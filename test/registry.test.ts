@@ -33,6 +33,35 @@ describe("noeta registry", () => {
     expect(body.versions[0]).toMatchObject({ version: "1.2.0", sha: "e3b0c44", yanked: false });
   });
 
+  it("stores and serves per-version dependency metadata", async () => {
+    const p = await post(
+      "/packages/acme/http",
+      {
+        version: "1.0.0",
+        url: "https://github.com/acme/http",
+        tag: "v1.0.0",
+        sha: "abc",
+        deps: [{ package: "acme/bytes", req: "^1.2" }, { package: "acme/url", req: ">=2, <3" }],
+      },
+      TOKEN,
+    );
+    expect(p.status).toBe(201);
+    const body = (await (await get("/packages/acme/http")).json()) as any;
+    expect(body.versions[0].deps).toEqual([
+      { package: "acme/bytes", req: "^1.2" },
+      { package: "acme/url", req: ">=2, <3" },
+    ]);
+  });
+
+  it("rejects a malformed dep", async () => {
+    const bad = await post(
+      "/packages/acme/d",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", deps: [{ package: "not-an-identity", req: "^1" }] },
+      TOKEN,
+    );
+    expect(bad.status).toBe(400);
+  });
+
   it("returns an empty list for an unknown package", async () => {
     const body = (await (await get("/packages/who/dis")).json()) as any;
     expect(body.versions).toEqual([]);

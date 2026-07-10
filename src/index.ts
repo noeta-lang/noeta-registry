@@ -20,10 +20,17 @@ interface VersionRow {
   url: string;
   tag: string;
   sha: string;
+  deps: string; // JSON array of { package, req }
   yanked: number;
 }
 
+interface Dep {
+  package: string; // company/package
+  req: string; // SemVer requirement
+}
+
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const NAME = /^[A-Za-z_][A-Za-z0-9_]*\/[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 
 export default {
@@ -69,7 +76,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, yanked FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, yanked FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
@@ -78,6 +85,7 @@ async function getVersions(env: Env, name: string): Promise<Response> {
     url: r.url,
     tag: r.tag,
     sha: r.sha,
+    deps: parseDeps(r.deps),
     yanked: r.yanked !== 0,
   }));
   return json({ name, versions });
@@ -99,15 +107,18 @@ async function publish(request: Request, env: Env, company: string, name: string
   ) {
     return json({ error: "body must be { version (semver), url, tag, sha }" }, 400);
   }
+  const deps = validateDeps((body as Record<string, unknown>).deps);
+  if (deps instanceof Response) return deps;
+  const depsJson = JSON.stringify(deps);
 
   const existing = await env.DB.prepare(
-    "SELECT url, tag, sha FROM packages WHERE name = ? AND version = ?",
+    "SELECT url, tag, sha, deps FROM packages WHERE name = ? AND version = ?",
   )
     .bind(name, version)
-    .first<{ url: string; tag: string; sha: string }>();
+    .first<{ url: string; tag: string; sha: string; deps: string }>();
   if (existing) {
-    // Idempotent re-publish of identical coordinates; otherwise the version is immutable.
-    if (existing.url === url && existing.tag === tag && existing.sha === sha) {
+    // Idempotent re-publish of identical coordinates + deps; otherwise the version is immutable.
+    if (existing.url === url && existing.tag === tag && existing.sha === sha && existing.deps === depsJson) {
       return json({ status: "already published", name, version }, 200);
     }
     return json(
@@ -117,10 +128,10 @@ async function publish(request: Request, env: Env, company: string, name: string
   }
 
   await env.DB.prepare(
-    "INSERT INTO packages (name, version, url, tag, sha, yanked, published_by, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+    "INSERT INTO packages (name, version, url, tag, sha, deps, yanked, published_by, published_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
   )
-    .bind(name, version, url, tag, sha, company, new Date().toISOString())
+    .bind(name, version, url, tag, sha, depsJson, company, new Date().toISOString())
     .run();
   return json({ status: "published", name, version, sha }, 201);
 }
@@ -188,6 +199,33 @@ async function authorizeScope(request: Request, env: Env, company: string): Prom
 }
 
 // --- helpers -------------------------------------------------------------------------------------
+
+/** Parse a stored `deps` JSON column back to an array (tolerating a corrupt/empty value). */
+function parseDeps(raw: string): Dep[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Validate an incoming `deps` field: absent → `[]`; else an array of `{ package (company/package),
+ *  req (non-empty) }`. Returns the normalized deps or a 400 Response. */
+function validateDeps(raw: unknown): Dep[] | Response {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return json({ error: "`deps` must be an array" }, 400);
+  const out: Dep[] = [];
+  for (const d of raw) {
+    const pkg = (d as Record<string, unknown>)?.package;
+    const req = (d as Record<string, unknown>)?.req;
+    if (typeof pkg !== "string" || !NAME.test(pkg) || typeof req !== "string" || req.length === 0) {
+      return json({ error: "each dep must be { package: \"company/package\", req: string }" }, 400);
+    }
+    out.push({ package: pkg, req });
+  }
+  return out;
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

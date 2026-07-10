@@ -19,10 +19,15 @@ array (not a 404) so the client has a single success path.
   "name": "acme/imgfx",
   "versions": [
     { "version": "1.2.0", "url": "https://github.com/acme/imgfx", "tag": "v1.2.0",
-      "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4", "yanked": false }
+      "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4", "yanked": false,
+      "deps": [ { "package": "acme/bytes", "req": "^1.0" } ] }
   ]
 }
 ```
+
+`deps` is each version's **registry dependencies** (`{ package: "company/package", req }`). The index
+carries them so a resolver can backtrack over version ranges by reading a candidate's requirements
+here, instead of cloning every candidate's source — the crates.io-index model.
 
 A `yanked` version is still returned (so an existing lockfile can still resolve it — Go's model) but
 a resolver must not newly *select* it.
@@ -33,7 +38,8 @@ Publish a release. Requires `Authorization: Bearer <token>`; the token must own 
 (`{company}`) — you can only publish under a company you control.
 
 ```
-Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "sha": "e3b0c4…" }
+Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "sha": "e3b0c4…",
+        "deps": [ { "package": "acme/bytes", "req": "^1.0" } ] }   // deps optional, default []
 
 201 Created                         published
 200 OK                              idempotent — identical coordinates already published

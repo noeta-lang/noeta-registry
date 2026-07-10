@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS packages (
   url          TEXT    NOT NULL,           -- git repository URL
   tag          TEXT    NOT NULL,           -- released tag
   sha          TEXT    NOT NULL,           -- commit SHA the tag resolved to at publish time (pinned)
+  deps         TEXT    NOT NULL DEFAULT '[]', -- JSON array of {package, req} — this version's registry deps
   yanked       INTEGER NOT NULL DEFAULT 0, -- 1 = still resolvable by existing pins, not newly selected
   published_by TEXT,                       -- the scope/token identity that published (provenance)
   published_at TEXT    NOT NULL,           -- ISO-8601 UTC
