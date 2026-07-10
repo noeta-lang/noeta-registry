@@ -1,0 +1,22 @@
+{
+  "name": "noeta-registry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Noeta package registry — an index (name+version → git coordinates) on Cloudflare Workers + D1.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "migrate:local": "wrangler d1 migrations apply noeta-registry --local",
+    "migrate:remote": "wrangler d1 migrations apply noeta-registry --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.9.14",
+    "@cloudflare/workers-types": "^4.20251011.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "wrangler": "~4.44.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  // Noeta registry Worker. Deploy with your own Cloudflare account:
+  //   npm run migrate:remote   (after `wrangler d1 create noeta-registry` and pasting its id below)
+  //   npm run deploy
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "noeta-registry",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-07-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "noeta-registry",
+      // Replace with the id printed by `wrangler d1 create noeta-registry`.
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+  // ADMIN_TOKEN is a secret, not committed: `wrangler secret put ADMIN_TOKEN`.
+}
