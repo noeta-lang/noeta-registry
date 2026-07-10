@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS packages (
   tag          TEXT    NOT NULL,           -- released tag
   sha          TEXT    NOT NULL,           -- commit SHA the tag resolved to at publish time (pinned)
   deps         TEXT    NOT NULL DEFAULT '[]', -- JSON array of {package, req} — this version's registry deps
+  sig          TEXT,                       -- hex Ed25519 signature over the attestation (provenance); NULL = unsigned
   yanked       INTEGER NOT NULL DEFAULT 0, -- 1 = still resolvable by existing pins, not newly selected
   published_by TEXT,                       -- the scope/token identity that published (provenance)
   published_at TEXT    NOT NULL,           -- ISO-8601 UTC
@@ -24,5 +25,6 @@ CREATE INDEX IF NOT EXISTS idx_packages_name ON packages (name);
 CREATE TABLE IF NOT EXISTS scopes (
   scope      TEXT PRIMARY KEY,             -- the "company" segment
   token_sha  TEXT NOT NULL,               -- SHA-256 hex of the publish token
+  public_key TEXT,                        -- hex Ed25519 public key for verifying this scope's release signatures
   created_at TEXT NOT NULL
 );

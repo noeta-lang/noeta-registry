@@ -94,6 +94,45 @@ describe("noeta registry", () => {
     expect(body.versions[0].yanked).toBe(true);
   });
 
+  it("verifies an Ed25519 release signature against the scope's public key", async () => {
+    // Generate a keypair (Web Crypto), register the scope with its public key, then publish a
+    // release signed over the canonical attestation — the Worker must verify and store it.
+    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const pubRaw = new Uint8Array(
+      (await crypto.subtle.exportKey("raw", (kp as CryptoKeyPair).publicKey)) as ArrayBuffer,
+    );
+    const publicHex = [...pubRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    // A distinct scope with its own token + key.
+    await post("/scopes", { scope: "signed", token: TOKEN + "signed", public_key: publicHex }, ADMIN);
+
+    const msg = new TextEncoder().encode("noeta-attestation-v1\nsigned/pkg\n1.0.0\nabc\n");
+    const sigRaw = new Uint8Array(await crypto.subtle.sign("Ed25519", (kp as CryptoKeyPair).privateKey, msg));
+    const signature = [...sigRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    const ok = await post(
+      "/packages/signed/pkg",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", signature },
+      TOKEN + "signed",
+    );
+    expect(ok.status).toBe(201);
+    // The signature is served back, and the scope key is fetchable for consumer verification.
+    const body = (await (await get("/packages/signed/pkg")).json()) as any;
+    expect(body.versions[0].signature).toBe(signature);
+    const scope = (await (await get("/scopes/signed")).json()) as any;
+    expect(scope.public_key).toBe(publicHex);
+
+    // A signature over a *different* attestation (wrong sha) must be rejected.
+    const badMsg = new TextEncoder().encode("noeta-attestation-v1\nsigned/pkg\n2.0.0\nEVIL\n");
+    const badSigRaw = new Uint8Array(await crypto.subtle.sign("Ed25519", (kp as CryptoKeyPair).privateKey, badMsg));
+    const badSig = [...badSigRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const rejected = await post(
+      "/packages/signed/pkg",
+      { version: "2.0.0", url: "u", tag: "t", sha: "abc", signature: badSig },
+      TOKEN + "signed",
+    );
+    expect(rejected.status).toBe(400);
+  });
+
   it("rejects a malformed publish body", async () => {
     const bad = await post("/packages/acme/z", { version: "not-semver", url: "u", tag: "t", sha: "s" }, TOKEN);
     expect(bad.status).toBe(400);

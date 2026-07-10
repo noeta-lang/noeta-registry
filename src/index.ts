@@ -21,6 +21,7 @@ interface VersionRow {
   tag: string;
   sha: string;
   deps: string; // JSON array of { package, req }
+  sig: string | null; // hex Ed25519 signature over the attestation, or null (unsigned)
   yanked: number;
 }
 
@@ -53,6 +54,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (parts.length === 2 && parts[1] === "scopes" && request.method === "POST") {
     return registerScope(request, env);
   }
+  // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
+  if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
+    return getScopeKey(env, parts[2]);
+  }
 
   // /v1/packages/{company}/{package}[/{version}/yank]
   if (parts[1] === "packages") {
@@ -76,7 +81,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, yanked FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, yanked FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
@@ -86,9 +91,20 @@ async function getVersions(env: Env, name: string): Promise<Response> {
     tag: r.tag,
     sha: r.sha,
     deps: parseDeps(r.deps),
+    signature: r.sig ?? undefined,
     yanked: r.yanked !== 0,
   }));
   return json({ name, versions });
+}
+
+/** GET /v1/scopes/{scope} — the scope's registered public key (404 if unregistered). */
+async function getScopeKey(env: Env, scope: string): Promise<Response> {
+  if (!IDENT.test(scope)) return json({ error: "scope must be an identifier" }, 400);
+  const row = await env.DB.prepare("SELECT public_key FROM scopes WHERE scope = ?")
+    .bind(scope)
+    .first<{ public_key: string | null }>();
+  if (!row || !row.public_key) return json({ error: `scope \`${scope}\` has no public key` }, 404);
+  return json({ scope, public_key: row.public_key });
 }
 
 /** POST — publish a release. Immutable + scope-owned. */
@@ -111,6 +127,27 @@ async function publish(request: Request, env: Env, company: string, name: string
   if (deps instanceof Response) return deps;
   const depsJson = JSON.stringify(deps);
 
+  // Provenance (Phase 4 #2): if a signature is present, verify it against the scope's registered
+  // public key over the canonical attestation — reject a bad or unverifiable signature so the index
+  // never serves a signature that doesn't actually attest this release. Absent → unsigned (allowed
+  // while provenance is adopted gradually).
+  const rawSig = (body as Record<string, unknown>).signature;
+  let sig: string | null = null;
+  if (rawSig !== undefined && rawSig !== null) {
+    if (typeof rawSig !== "string" || !/^[0-9a-f]{128}$/.test(rawSig)) {
+      return json({ error: "`signature` must be a 128-char hex Ed25519 signature" }, 400);
+    }
+    const scopeRow = await env.DB.prepare("SELECT public_key FROM scopes WHERE scope = ?")
+      .bind(company)
+      .first<{ public_key: string | null }>();
+    if (!scopeRow || !scopeRow.public_key) {
+      return json({ error: `scope \`${company}\` has no public key registered to verify a signature` }, 400);
+    }
+    const ok = await verifyEd25519(scopeRow.public_key, sig_message(name, version, sha), rawSig);
+    if (!ok) return json({ error: "signature does not verify against the scope's public key" }, 400);
+    sig = rawSig;
+  }
+
   const existing = await env.DB.prepare(
     "SELECT url, tag, sha, deps FROM packages WHERE name = ? AND version = ?",
   )
@@ -128,12 +165,12 @@ async function publish(request: Request, env: Env, company: string, name: string
   }
 
   await env.DB.prepare(
-    "INSERT INTO packages (name, version, url, tag, sha, deps, yanked, published_by, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+    "INSERT INTO packages (name, version, url, tag, sha, deps, sig, yanked, published_by, published_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
   )
-    .bind(name, version, url, tag, sha, depsJson, company, new Date().toISOString())
+    .bind(name, version, url, tag, sha, depsJson, sig, company, new Date().toISOString())
     .run();
-  return json({ status: "published", name, version, sha }, 201);
+  return json({ status: "published", name, version, sha, signed: sig !== null }, 201);
 }
 
 /** POST …/yank — mark (or clear) a version yanked; never deletes. */
@@ -171,15 +208,19 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
   }
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const { scope, token } = body as Record<string, unknown>;
+  const { scope, token, public_key } = body as Record<string, unknown>;
   if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars) }" }, 400);
   }
+  // Optional Ed25519 public key (hex) to verify this scope's release signatures (provenance).
+  if (public_key !== undefined && (typeof public_key !== "string" || !/^[0-9a-f]{64}$/.test(public_key))) {
+    return json({ error: "`public_key` must be a 64-char hex Ed25519 public key" }, 400);
+  }
   await env.DB.prepare(
-    "INSERT INTO scopes (scope, token_sha, created_at) VALUES (?, ?, ?) " +
-      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha",
+    "INSERT INTO scopes (scope, token_sha, public_key, created_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha, public_key = excluded.public_key",
   )
-    .bind(scope, await sha256hex(token), new Date().toISOString())
+    .bind(scope, await sha256hex(token), (public_key as string | undefined) ?? null, new Date().toISOString())
     .run();
   return json({ status: "scope registered", scope }, 201);
 }
@@ -246,6 +287,33 @@ function bearer(request: Request): string | null {
   const h = request.headers.get("authorization") ?? "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
+}
+
+/** The canonical attestation bytes — MUST match noeta-pm's `Attestation::canonical_bytes`. */
+function sig_message(name: string, version: string, sha: string): Uint8Array {
+  return new TextEncoder().encode(`noeta-attestation-v1\n${name}\n${version}\n${sha}\n`);
+}
+
+/** Verify a hex Ed25519 signature over `message` against a hex public key (Web Crypto). */
+async function verifyEd25519(publicHex: string, message: Uint8Array, signatureHex: string): Promise<boolean> {
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      hexToBytes(publicHex),
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
+    return await crypto.subtle.verify("Ed25519", key, hexToBytes(signatureHex), message);
+  } catch {
+    return false;
+  }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 async function sha256hex(s: string): Promise<string> {
