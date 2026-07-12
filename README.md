@@ -23,6 +23,23 @@ client that consumes it lives in the language toolchain (`noeta-pm`), and this W
   separately and mutably: docs can be refreshed or regenerated without touching the immutable
   release record, and a bad docs blob never affects resolution or the SHA pin.
 
+## Web UI
+
+Every path that is **not** under `/v1` is a public, read-only **browser** (dependency-free HTML,
+served by the same Worker):
+
+- `/` — recently published packages.
+- `/{company}/{package}` — the package: latest version, git coordinates, dependencies, provenance,
+  and a link to its docs.
+- `/{company}/{package}/{version}` — a specific version.
+- `/{company}/{package}/{version}/docs` — **rendered documentation** from the release's stored
+  `docs.json` (the docs.rs analog), if the publisher uploaded one.
+
+It renders only already-public index data and stored docs, so it needs no login, sessions, or
+account model — management (publish, yank) stays in the `noeta` CLI. Doc prose is publisher-supplied,
+so the small built-in Markdown renderer is **escape-first** and drops non-`http(s)` link schemes; a
+strict `Content-Security-Policy` (`default-src 'none'`) is layered on top.
+
 ## Local development
 
 ```sh

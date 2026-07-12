@@ -9,6 +9,8 @@
 // Intentionally dependency-free (a registry that fights supply-chain attacks shouldn't itself pull a
 // tree of npm deps): plain routing, the Workers `crypto` for token hashing, D1 for storage.
 
+import { handleWeb } from "./web";
+
 export interface Env {
   DB: D1Database;
   // A Worker secret; gates the bootstrap `POST /v1/scopes` endpoint.
@@ -49,7 +51,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean); // e.g. ["v1","packages","acme","imgfx"]
 
-  if (parts[0] !== "v1") return json({ error: "unknown API version" }, 404);
+  // Everything not under `/v1` is the public, read-only **web browser** (see web.ts): the JSON API
+  // lives at `/v1`, humans get HTML everywhere else. Read-only, so only GET/HEAD.
+  if (parts[0] !== "v1") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return json({ error: "method not allowed" }, 405);
+    }
+    return handleWeb(env, parts);
+  }
 
   // POST /v1/scopes  (admin bootstrap)
   if (parts.length === 2 && parts[1] === "scopes" && request.method === "POST") {
