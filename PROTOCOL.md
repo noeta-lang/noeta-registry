@@ -27,7 +27,8 @@ array (not a 404) so the client has a single success path.
 
 `deps` is each version's **registry dependencies** (`{ package: "company/package", req }`). The index
 carries them so a resolver can backtrack over version ranges by reading a candidate's requirements
-here, instead of cloning every candidate's source — the crates.io-index model.
+here, instead of cloning every candidate's source — the crates.io-index model. A signed release also
+carries its provenance — a `signature` (key) or `bundle` (keyless) field — for the consumer to verify.
 
 A `yanked` version is still returned (so an existing lockfile can still resolve it — Go's model) but
 a resolver must not newly *select* it.
@@ -39,14 +40,28 @@ Publish a release. Requires `Authorization: Bearer <token>`; the token must own 
 
 ```
 Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "sha": "e3b0c4…",
-        "deps": [ { "package": "acme/bytes", "req": "^1.0" } ] }   // deps optional, default []
+        "deps": [ { "package": "acme/bytes", "req": "^1.0" } ],   // deps optional, default []
+        "signature": "<128-hex>" | "bundle": "<json>" }           // provenance — at most one, optional
 
 201 Created                         published
 200 OK                              idempotent — identical coordinates already published
 409 Conflict                        this version exists with different coordinates (immutable)
 401 Unauthorized / 403 Forbidden    missing/invalid token, or token does not own {company}
-400 Bad Request                     malformed body / identity
+400 Bad Request                     malformed body / identity / both provenance roots / bad signature
 ```
+
+**Provenance (optional, at most one root).** A release may attest its `version → commit` under one
+of two trust roots — never both (a second root is a downgrade surface):
+- `signature` — a 128-hex Ed25519 signature over the canonical attestation. **Verified server-side**
+  against the scope's registered public key (`GET /v1/scopes/{scope}`); a signature that doesn't
+  verify is a `400`, so the index never serves a non-attesting one.
+- `bundle` — a keyless Sigstore bundle (DSSE envelope + Fulcio certificate + Rekor inclusion proof),
+  as a JSON string. **Stored verbatim, not verified server-side**: its trust root is Sigstore's public
+  infrastructure, not a per-scope key, and a keyless consumer verifies the bundle *offline* against
+  its own pinned policy — so the registry is never the trust boundary for it. Validated for shape
+  (non-empty JSON) only.
+
+Both provenance fields are echoed back on `GET` (`signature` / `bundle`, absent when unset).
 
 A published `(name, version)` is **immutable**: it can be *yanked* but never overwritten with
 different coordinates. The `sha` is recorded at publish time so the index — not just a consumer's

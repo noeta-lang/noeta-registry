@@ -181,6 +181,43 @@ describe("noeta registry", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("stores and serves a keyless provenance bundle verbatim (no scope key needed)", async () => {
+    // A keyless bundle is stored without server-side verification — its trust root is Sigstore's
+    // public infrastructure, and the consumer verifies it offline. So `bundle` round-trips even for
+    // a scope with no registered public key.
+    const bundle = JSON.stringify({
+      mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
+      dsseEnvelope: { payload: "e30=", payloadType: "application/vnd.in-toto+json" },
+    });
+    const ok = await post(
+      "/packages/acme/keyless",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", bundle },
+      TOKEN,
+    );
+    expect(ok.status).toBe(201);
+    const body = (await (await get("/packages/acme/keyless")).json()) as any;
+    expect(body.versions[0].bundle).toBe(bundle);
+    expect(body.versions[0].signature).toBeUndefined();
+  });
+
+  it("rejects a release carrying both a signature and a bundle", async () => {
+    const both = await post(
+      "/packages/acme/both",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", signature: "a".repeat(128), bundle: "{}" },
+      TOKEN,
+    );
+    expect(both.status).toBe(400);
+  });
+
+  it("rejects a non-JSON bundle", async () => {
+    const bad = await post(
+      "/packages/acme/badbundle",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", bundle: "not json" },
+      TOKEN,
+    );
+    expect(bad.status).toBe(400);
+  });
+
   it("rejects a malformed publish body", async () => {
     const bad = await post("/packages/acme/z", { version: "not-semver", url: "u", tag: "t", sha: "s" }, TOKEN);
     expect(bad.status).toBe(400);

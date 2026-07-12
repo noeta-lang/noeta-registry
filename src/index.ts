@@ -22,6 +22,7 @@ interface VersionRow {
   sha: string;
   deps: string; // JSON array of { package, req }
   sig: string | null; // hex Ed25519 signature over the attestation, or null (unsigned)
+  bundle: string | null; // JSON Sigstore keyless bundle, or null
   yanked: number;
 }
 
@@ -88,7 +89,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, yanked FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
@@ -99,6 +100,7 @@ async function getVersions(env: Env, name: string): Promise<Response> {
     sha: r.sha,
     deps: parseDeps(r.deps),
     signature: r.sig ?? undefined,
+    bundle: r.bundle ?? undefined,
     yanked: r.yanked !== 0,
   }));
   return json({ name, versions });
@@ -196,8 +198,19 @@ async function publish(request: Request, env: Env, company: string, name: string
   // never serves a signature that doesn't actually attest this release. Absent → unsigned (allowed
   // while provenance is adopted gradually).
   const rawSig = (body as Record<string, unknown>).signature;
+  const rawBundle = (body as Record<string, unknown>).bundle;
+  const hasSig = rawSig !== undefined && rawSig !== null;
+  const hasBundle = rawBundle !== undefined && rawBundle !== null;
+  // A release carries at most one trust root (matches the client's `Release::check_provenance_shape`):
+  // two roots would make "which did the consumer verify?" ambiguous and give a downgrade a second surface.
+  if (hasSig && hasBundle) {
+    return json({ error: "a release carries either a `signature` (key) or a `bundle` (keyless), not both" }, 400);
+  }
+
+  // Key trust root: verify the Ed25519 signature against the scope's registered public key over the
+  // canonical attestation, so the index never serves a signature that doesn't attest this release.
   let sig: string | null = null;
-  if (rawSig !== undefined && rawSig !== null) {
+  if (hasSig) {
     if (typeof rawSig !== "string" || !/^[0-9a-f]{128}$/.test(rawSig)) {
       return json({ error: "`signature` must be a 128-char hex Ed25519 signature" }, 400);
     }
@@ -210,6 +223,24 @@ async function publish(request: Request, env: Env, company: string, name: string
     const ok = await verifyEd25519(scopeRow.public_key, sig_message(name, version, sha), rawSig);
     if (!ok) return json({ error: "signature does not verify against the scope's public key" }, 400);
     sig = rawSig;
+  }
+
+  // Keyless trust root: stored verbatim, NOT verified server-side. Its root is Sigstore's public
+  // infrastructure (Fulcio/Rekor), not a per-scope key — verification would need those roots and full
+  // cert-chain + inclusion-proof checking (heavy, dependency-bearing) — and a keyless consumer
+  // verifies the bundle offline against its own pinned policy regardless, so the registry is never
+  // the trust boundary for it. Validate only shape: a non-empty JSON document.
+  let bundle: string | null = null;
+  if (hasBundle) {
+    if (typeof rawBundle !== "string" || rawBundle.length === 0) {
+      return json({ error: "`bundle` must be a non-empty JSON Sigstore bundle string" }, 400);
+    }
+    try {
+      JSON.parse(rawBundle);
+    } catch {
+      return json({ error: "`bundle` must be valid JSON (a Sigstore bundle)" }, 400);
+    }
+    bundle = rawBundle;
   }
 
   const existing = await env.DB.prepare(
@@ -229,12 +260,15 @@ async function publish(request: Request, env: Env, company: string, name: string
   }
 
   await env.DB.prepare(
-    "INSERT INTO packages (name, version, url, tag, sha, deps, sig, yanked, published_by, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+    "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
   )
-    .bind(name, version, url, tag, sha, depsJson, sig, company, new Date().toISOString())
+    .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, new Date().toISOString())
     .run();
-  return json({ status: "published", name, version, sha, signed: sig !== null }, 201);
+  return json(
+    { status: "published", name, version, sha, provenance: sig ? "key" : bundle ? "keyless" : "unsigned" },
+    201,
+  );
 }
 
 /** POST …/yank — mark (or clear) a version yanked; never deletes. */
