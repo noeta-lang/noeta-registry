@@ -13,6 +13,17 @@ function post(path: string, body: unknown, token?: string): Promise<Response> {
 }
 const get = (path: string) => SELF.fetch("https://registry.test/v1" + path);
 
+function putText(path: string, body: string, token?: string): Promise<Response> {
+  return SELF.fetch("https://registry.test/v1" + path, {
+    method: "PUT",
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      "content-type": "application/json",
+    },
+    body,
+  });
+}
+
 // Bootstrap the `acme` scope so publishes under it are authorized.
 beforeAll(async () => {
   const r = await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN);
@@ -131,6 +142,43 @@ describe("noeta registry", () => {
       TOKEN + "signed",
     );
     expect(rejected.status).toBe(400);
+  });
+
+  it("stores and serves a release's documentation artifact (last-wins)", async () => {
+    await post("/packages/acme/docd", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    // No docs yet.
+    const none = await get("/packages/acme/docd/docs/1.0.0");
+    expect(none.status).toBe(404);
+    // Upload the artifact; it comes back verbatim as JSON.
+    const artifact = JSON.stringify({ schema: 1, package: { name: "acme/docd", version: "1.0.0" }, modules: [] });
+    const up = await putText("/packages/acme/docd/docs/1.0.0", artifact, TOKEN);
+    expect(up.status).toBe(200);
+    const got = await get("/packages/acme/docd/docs/1.0.0");
+    expect(got.status).toBe(200);
+    expect(got.headers.get("content-type")).toContain("application/json");
+    expect(await got.json()).toEqual({ schema: 1, package: { name: "acme/docd", version: "1.0.0" }, modules: [] });
+    // Re-upload overwrites (advisory, last-wins — unlike the immutable release).
+    const artifact2 = JSON.stringify({ schema: 1, package: { name: "acme/docd", version: "1.0.0" }, modules: [{ file: "lib.noe" }] });
+    const up2 = await putText("/packages/acme/docd/docs/1.0.0", artifact2, TOKEN);
+    expect(up2.status).toBe(200);
+    const got2 = (await (await get("/packages/acme/docd/docs/1.0.0")).json()) as any;
+    expect(got2.modules).toHaveLength(1);
+  });
+
+  it("refuses docs for an unpublished release, and requires scope ownership", async () => {
+    const orphan = await putText("/packages/acme/nope/docs/1.0.0", "{}", TOKEN);
+    expect(orphan.status).toBe(404); // the release doesn't exist
+    await post("/packages/acme/guarded", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    const noauth = await putText("/packages/acme/guarded/docs/1.0.0", "{}");
+    expect(noauth.status).toBe(401);
+    const wrong = await putText("/packages/acme/guarded/docs/1.0.0", "{}", "wrong");
+    expect(wrong.status).toBe(403);
+  });
+
+  it("rejects a non-JSON docs body", async () => {
+    await post("/packages/acme/badoc", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    const bad = await putText("/packages/acme/badoc/docs/1.0.0", "not json at all", TOKEN);
+    expect(bad.status).toBe(400);
   });
 
   it("rejects a malformed publish body", async () => {

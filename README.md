@@ -19,6 +19,9 @@ client that consumes it lives in the language toolchain (`noeta-pm`), and this W
   consumer lockfile) is authoritative on version→commit.
 - **Dependency-free Worker** — no runtime npm dependencies (a registry that fights supply-chain
   attacks shouldn't ship a tree of them).
+- **Advisory docs** — a release may carry its generated `docs.json` (`noeta doc --out`), stored
+  separately and mutably: docs can be refreshed or regenerated without touching the immutable
+  release record, and a bad docs blob never affects resolution or the SHA pin.
 
 ## Local development
 

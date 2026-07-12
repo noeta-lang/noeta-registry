@@ -73,6 +73,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (parts.length === 6 && parts[5] === "yank" && request.method === "POST") {
       return yank(request, env, company, name, parts[4]);
     }
+    // Documentation artifact (docs-ingestion): PUT stores, GET serves — path
+    // `.../packages/{company}/{package}/docs/{version}` (the `docs` literal precedes the version,
+    // distinct from yank's trailing `/yank`).
+    if (parts.length === 6 && parts[4] === "docs") {
+      if (request.method === "PUT") return putDocs(request, env, company, name, parts[5]);
+      if (request.method === "GET") return getDocs(env, name, parts[5]);
+    }
   }
 
   return json({ error: "not found" }, 404);
@@ -105,6 +112,63 @@ async function getScopeKey(env: Env, scope: string): Promise<Response> {
     .first<{ public_key: string | null }>();
   if (!row || !row.public_key) return json({ error: `scope \`${scope}\` has no public key` }, 404);
   return json({ scope, public_key: row.public_key });
+}
+
+/** The maximum stored docs.json size (bytes). Generous for a real package's API surface, bounded so
+ *  a single upload can't bloat the row store; a larger artifact is a 413. */
+const MAX_DOCS_BYTES = 1024 * 1024;
+
+/** PUT …/docs/{version} — store a release's documentation artifact (advisory, scope-owned,
+ *  last-wins). The release must be published (docs belong to a release); the body is the verbatim
+ *  `docs.json` and must be valid JSON. */
+async function putDocs(
+  request: Request,
+  env: Env,
+  company: string,
+  name: string,
+  version: string,
+): Promise<Response> {
+  if (!SEMVER.test(version)) return json({ error: "version must be semver" }, 400);
+  const auth = await authorizeScope(request, env, company);
+  if (auth instanceof Response) return auth;
+
+  const body = await request.text();
+  if (body.length > MAX_DOCS_BYTES) {
+    return json({ error: `docs artifact exceeds ${MAX_DOCS_BYTES} bytes` }, 413);
+  }
+  // Store verbatim, but reject a non-JSON blob so the index never serves garbage back.
+  try {
+    JSON.parse(body);
+  } catch {
+    return json({ error: "docs body must be valid JSON (the `docs.json` artifact)" }, 400);
+  }
+
+  // Docs belong to a published release — refuse orphan docs for a version that doesn't exist.
+  const release = await env.DB.prepare("SELECT 1 FROM packages WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first();
+  if (!release) return json({ error: `${name}@${version} is not published` }, 404);
+
+  await env.DB.prepare(
+    "INSERT INTO docs (name, version, docs_json, updated_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(name, version) DO UPDATE SET docs_json = excluded.docs_json, updated_at = excluded.updated_at",
+  )
+    .bind(name, version, body, new Date().toISOString())
+    .run();
+  return json({ status: "docs stored", name, version });
+}
+
+/** GET …/docs/{version} — serve a release's stored documentation artifact verbatim (404 if none). */
+async function getDocs(env: Env, name: string, version: string): Promise<Response> {
+  if (!SEMVER.test(version)) return json({ error: "version must be semver" }, 400);
+  const row = await env.DB.prepare("SELECT docs_json FROM docs WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first<{ docs_json: string }>();
+  if (!row) return json({ error: `no docs stored for ${name}@${version}` }, 404);
+  // The stored blob is the client's `docs.json` verbatim — serve it as-is, not re-wrapped.
+  return new Response(row.docs_json, {
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 /** POST — publish a release. Immutable + scope-owned. */

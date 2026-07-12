@@ -57,6 +57,45 @@ lockfile — is authoritative on "this version = this commit".
 Mark (or un-mark) a version yanked. Same scope-ownership auth. Yank never deletes — existing pins
 keep resolving; new selections skip it.
 
+## `GET /v1/scopes/{scope}` — the scope's public key
+
+Serve a scope's registered Ed25519 **public key** (hex), for a consumer to verify that scope's
+release signatures independently of trusting the registry. `404` if the scope registered no key.
+
+```
+200 OK   { "scope": "acme", "public_key": "<64-char hex>" }
+```
+
+## `PUT /v1/packages/{company}/{package}/docs/{version}`
+
+Store a release's **documentation artifact** — the `docs.json` the toolchain generates
+(`noeta doc --out`). Requires `Authorization: Bearer <token>` owning `{company}` (same auth as
+publish). The body is the **verbatim `docs.json`** (`content-type: application/json`); it must be
+valid JSON and ≤ 1 MiB. The `(company/package, version)` must already be **published** — docs
+belong to a release.
+
+```
+200 OK               docs stored (last-wins — a re-upload overwrites)
+404 Not Found        that (name, version) is not published
+401 / 403            missing/invalid token, or token does not own {company}
+400 Bad Request      body is not valid JSON
+413 Payload Too Large  artifact exceeds 1 MiB
+```
+
+Docs are **advisory metadata, not provenance**: unsigned and mutable (unlike the immutable release
+record), so a regenerated artifact — or a registry that regenerates docs from source itself, the
+docs.rs model — can refresh them without touching the release.
+
+## `GET /v1/packages/{company}/{package}/docs/{version}`
+
+Serve a release's stored documentation artifact **verbatim** (the `docs.json`, not a wrapper), or
+`404` if none is stored.
+
+```
+200 OK   <the docs.json artifact, application/json>
+404 Not Found   no docs stored for this (name, version)
+```
+
 ## `POST /v1/scopes` *(admin, bootstrap)*
 
 Register a scope's publish token. Requires `Authorization: Bearer <ADMIN_TOKEN>` (a Worker secret).
