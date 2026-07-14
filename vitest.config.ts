@@ -15,6 +15,11 @@ export default defineWorkersConfig(async () => {
             bindings: {
               TEST_MIGRATIONS: migrations,
               ADMIN_TOKEN: "test-admin-token",
+              // Self-service claim OIDC config — a hermetic test issuer whose JWKS the claim tests
+              // serve via fetchMock (namespace-protection #1).
+              OIDC_ISSUER: "https://oidc.test",
+              OIDC_AUDIENCE: "noeta-registry",
+              OIDC_JWKS_URL: "https://oidc.test/jwks",
             },
           },
         },

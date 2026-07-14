@@ -120,9 +120,36 @@ Serve a release's stored documentation artifact **verbatim** (the `docs.json`, n
 404 Not Found   no docs stored for this (name, version)
 ```
 
+## `POST /v1/scopes/claim` — self-service scope claim (OIDC-proven)
+
+Claim a scope by **proving you control the GitHub org/user of the same name**, via a GitHub Actions
+OIDC token. This is the scalable, admin-free path to ownership, and its proof-of-control is the
+anti-squatting mechanism — you cannot claim `stripe` unless your OIDC token says you *are* `stripe`.
+
+```
+Body: { "scope": "acme", "token": "<publish-token>", "oidc": "<GitHub OIDC JWT>" }
+
+201 Created   { "status": "scope claimed",    "scope": "acme", "owner": "acme" }
+200 OK        { "status": "scope re-claimed", "scope": "acme", "owner": "acme" }   // token rotation
+401 Unauthorized   OIDC token missing / expired / wrong issuer|audience / bad signature
+403 Forbidden      scope ≠ token's repository_owner, or a reserved namespace (std/noeta/core/para)
+409 Conflict       scope already owned by another principal (different identity, or the admin)
+400 Bad Request    malformed body
+501 Not Implemented  claiming is not configured on this registry (no OIDC_AUDIENCE)
+```
+
+The Worker verifies the JWT's signature against the issuer's JWKS and checks issuer, audience, and
+expiry, then requires `scope === repository_owner`. Ownership pins the stable `repository_owner_id`
+claim, so a later **re-claim** (to rotate the publish token) must come from the *same* identity — a
+renamed or transferred org can't silently take a scope over — and an admin-bootstrapped scope is never
+transferred to a claimant. Configure via `OIDC_ISSUER` / `OIDC_JWKS_URL` (default: GitHub Actions) and
+`OIDC_AUDIENCE` (the audience your publishing workflow requests its token for).
+
 ## `POST /v1/scopes` *(admin, bootstrap)*
 
-Register a scope's publish token. Requires `Authorization: Bearer <ADMIN_TOKEN>` (a Worker secret).
-Body `{ "scope": "acme", "token": "<publish-token>" }`. The token is stored **hashed** (SHA-256);
-publishing presents the raw token and the Worker compares hashes. This is the minimal bootstrap; a
-real deployment grows OAuth/device-flow onboarding.
+Register a scope's publish token directly. Requires `Authorization: Bearer <ADMIN_TOKEN>` (a Worker
+secret). Body `{ "scope": "acme", "token": "<publish-token>" }`. The token is stored **hashed**
+(SHA-256); publishing presents the raw token and the Worker compares hashes. This is how the first
+party provisions **reserved first-party** namespaces (e.g. `para`) that self-service claiming refuses,
+and remains available as an escape hatch; ordinary users take the OIDC `claim` path above. A built-in
+namespace (`std`/`noeta`/`core`) is refused even here.

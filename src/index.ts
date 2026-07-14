@@ -10,11 +10,17 @@
 // tree of npm deps): plain routing, the Workers `crypto` for token hashing, D1 for storage.
 
 import { handleWeb } from "./web";
+import { oidcConfig, verifyOidc } from "./oidc";
 
 export interface Env {
   DB: D1Database;
   // A Worker secret; gates the bootstrap `POST /v1/scopes` endpoint.
   ADMIN_TOKEN?: string;
+  // OIDC config for self-service scope claiming (namespace-protection #1). Absent AUDIENCE disables
+  // claiming (see `oidcConfig`). Defaults target GitHub Actions' public issuer.
+  OIDC_ISSUER?: string;
+  OIDC_AUDIENCE?: string;
+  OIDC_JWKS_URL?: string;
 }
 
 interface VersionRow {
@@ -37,14 +43,14 @@ const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*\/[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 
-// Reserved built-in namespaces (namespace-protection arc #2) — MUST match noeta-pm's `reserved`
-// module. `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
-// registry, so they can never be registered or published here (a `std/*` release could only be a
-// supply-chain attack trying to shadow core code). First-party *published* namespaces like `para`
-// are resolvable like any package but reserved against open self-service claims — that guard arrives
-// with self-service claiming in namespace-protection #1; admin bootstrap (the first party) may
-// register them today.
+// Reserved namespaces (namespace-protection arcs #2/#1) — MUST match noeta-pm's `reserved` module.
+// `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
+// registry, so they can never be registered, published, or claimed here (a `std/*` release could
+// only be a supply-chain attack trying to shadow core code). First-party *published* namespaces like
+// `para` are resolvable like any package but reserved against open self-service claims — the admin
+// bootstrap (the first party) may register them, but `claimScope` refuses them.
 const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
+const FIRST_PARTY_SCOPES = new Set(["para"]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -72,6 +78,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   // POST /v1/scopes  (admin bootstrap)
   if (parts.length === 2 && parts[1] === "scopes" && request.method === "POST") {
     return registerScope(request, env);
+  }
+  // POST /v1/scopes/claim  — self-service claim, proven by a GitHub OIDC token
+  if (parts.length === 3 && parts[1] === "scopes" && parts[2] === "claim" && request.method === "POST") {
+    return claimScope(request, env);
   }
   // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
   if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
@@ -349,12 +359,93 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
     return json({ error: "`public_key` must be a 64-char hex Ed25519 public key" }, 400);
   }
   await env.DB.prepare(
-    "INSERT INTO scopes (scope, token_sha, public_key, created_at) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha, public_key = excluded.public_key",
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) " +
+      "VALUES (?, ?, ?, 'admin', NULL, ?) " +
+      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha, public_key = excluded.public_key, " +
+      "owner_kind = 'admin', owner_id = NULL",
   )
     .bind(scope, await sha256hex(token), (public_key as string | undefined) ?? null, new Date().toISOString())
     .run();
   return json({ status: "scope registered", scope }, 201);
+}
+
+/** POST /v1/scopes/claim — self-service scope claiming (namespace-protection #1).
+ *
+ * Instead of an admin handing out tokens, a scope is claimed by whoever proves — via a GitHub Actions
+ * OIDC token — that they control the GitHub org/user *of the same name*. That proof-of-control is the
+ * anti-squatting mechanism: you cannot claim `stripe` unless your OIDC token's `repository_owner` is
+ * `stripe`, so popular names can't be drive-by registered. Ownership pins the stable
+ * `repository_owner_id`, so re-claims (token rotation) require the same identity, and a renamed or
+ * transferred org can't silently take a scope over. Reserved namespaces are never claimable here. */
+async function claimScope(request: Request, env: Env): Promise<Response> {
+  const cfg = oidcConfig(env);
+  if (!cfg) {
+    return json({ error: "self-service scope claiming is not configured on this registry" }, 501);
+  }
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const { scope, token, oidc } = body as Record<string, unknown>;
+  if (
+    typeof scope !== "string" || !IDENT.test(scope) ||
+    typeof token !== "string" || token.length < 16 ||
+    typeof oidc !== "string" || oidc.length === 0
+  ) {
+    return json({ error: "body must be { scope (identifier), token (>=16 chars), oidc (JWT) }" }, 400);
+  }
+  // Reserved namespaces are never open to self-service claims.
+  if (BUILTIN_SCOPES.has(scope)) {
+    return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be claimed` }, 403);
+  }
+  if (FIRST_PARTY_SCOPES.has(scope)) {
+    return json(
+      { error: `\`${scope}\` is a reserved first-party namespace and is not open for self-service claims` },
+      403,
+    );
+  }
+
+  // Authenticate the OIDC token (signature + issuer + audience + expiry).
+  let claims;
+  try {
+    claims = await verifyOidc(oidc, cfg);
+  } catch (err) {
+    return json({ error: `OIDC verification failed: ${err instanceof Error ? err.message : String(err)}` }, 401);
+  }
+
+  // Authorize: the anti-squat rule — the scope must be the claimant's own GitHub org/user name.
+  if (claims.repository_owner !== scope) {
+    return json(
+      {
+        error:
+          `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
+          `a scope is claimable only by the org/user of the same name`,
+      },
+      403,
+    );
+  }
+  const ownerId = claims.repository_owner_id;
+
+  const existing = await env.DB.prepare("SELECT owner_kind, owner_id FROM scopes WHERE scope = ?")
+    .bind(scope)
+    .first<{ owner_kind: string | null; owner_id: string | null }>();
+  if (existing) {
+    // Only the same proven identity may re-claim (to rotate its token). Anything else — an
+    // admin-owned scope, or a different owner_id — is refused; ownership never transfers implicitly.
+    if (existing.owner_kind !== "github-oidc" || existing.owner_id !== ownerId) {
+      return json({ error: `scope \`${scope}\` is already owned by another principal` }, 409);
+    }
+    await env.DB.prepare("UPDATE scopes SET token_sha = ? WHERE scope = ?")
+      .bind(await sha256hex(token), scope)
+      .run();
+    return json({ status: "scope re-claimed", scope, owner: claims.repository_owner }, 200);
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) " +
+      "VALUES (?, ?, NULL, 'github-oidc', ?, ?)",
+  )
+    .bind(scope, await sha256hex(token), ownerId, new Date().toISOString())
+    .run();
+  return json({ status: "scope claimed", scope, owner: claims.repository_owner }, 201);
 }
 
 /** Authorize a publish/yank: the bearer token must own `company`'s scope. */
