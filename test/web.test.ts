@@ -50,11 +50,38 @@ const DOCS = JSON.stringify({
   ],
 });
 
+// A by-module API-reference artifact (the shape `noeta doc --api` emits): native modules with no
+// source file, several functions, and — deliberately — a `new` in two different modules, to prove
+// anchors are scoped per module (a bare `decl-new` would collide across the reference).
+const API_DOCS = JSON.stringify({
+  schema: 1,
+  modules: [
+    {
+      file: "",
+      namespace: "std.math",
+      doc: null,
+      items: [
+        { kind: "fn", name: "sqrt", signature: "fn sqrt(float): float", doc: "The square root.", public: true },
+        { kind: "fn", name: "pow", signature: "fn pow(float, float): float", doc: null, public: true },
+        { kind: "fn", name: "new", signature: "fn new(): float", doc: null, public: true },
+      ],
+    },
+    {
+      file: "",
+      namespace: "std.cell",
+      doc: null,
+      items: [{ kind: "fn", name: "new", signature: "fn new(T): Cell<T>", doc: null, public: true }],
+    },
+  ],
+});
+
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
   await post("/packages/acme/greeter", { version: "1.0.0", url: "https://github.com/acme/greeter", tag: "v1.0.0", sha: "aaa" }, TOKEN);
   await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: "bbb" }, TOKEN);
   expect((await putText("/packages/acme/greeter/docs/1.1.0", DOCS, TOKEN)).status).toBe(200);
+  await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
+  expect((await putText("/packages/acme/std/docs/1.0.0", API_DOCS, TOKEN)).status).toBe(200);
 });
 
 describe("registry web UI", () => {
@@ -99,6 +126,22 @@ describe("registry web UI", () => {
     // A response CSP forbids scripts as defense in depth.
     const r = await web("/acme/greeter/1.1.0/docs");
     expect(r.headers.get("content-security-policy")).toContain("default-src 'none'");
+  });
+
+  it("renders a by-module API reference with a per-module contents list and module-scoped anchors", async () => {
+    const body = await (await web("/acme/std/1.0.0/docs")).text();
+    // Both modules render.
+    expect(body).toContain("std.math");
+    expect(body).toContain("std.cell");
+    // A per-module contents list (≥3 decls) with a jump link to a scoped anchor.
+    expect(body).toContain('<ul class="toc">');
+    expect(body).toContain('href="#std-math--sqrt"');
+    // `new` appears in both modules, but the anchors are distinct (no cross-module collision).
+    expect(body).toContain('id="std-math--new"');
+    expect(body).toContain('id="std-cell--new"');
+    expect(body).not.toContain('id="decl-new"');
+    // The one-decl module gets no contents list (would be noise).
+    expect((body.match(/<ul class="toc">/g) || []).length).toBe(1);
   });
 
   it("404s an unknown package and an unknown docs version", async () => {

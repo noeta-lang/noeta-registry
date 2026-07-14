@@ -197,7 +197,19 @@ async function docsPage(env: Env, name: string, version: string): Promise<Page> 
 
 function renderModule(m: DocsModule): string {
   const title = m.namespace || m.file || "module";
+  const modId = slug(title);
   const items = Array.isArray(m.items) ? m.items : [];
+  const isDecl = (i: DocsSection | DocsDecl): i is DocsDecl =>
+    typeof (i as DocsSection).section !== "string" && !!(i as DocsDecl).name && !!(i as DocsDecl).kind;
+  const decls = items.filter(isDecl);
+  // A per-module contents list (jump links) for modules with several declarations — the by-module
+  // API reference (e.g. std.math's 26 functions) reads as one long flat list otherwise. CSS-only.
+  const toc =
+    decls.length >= 3
+      ? `<ul class="toc">${decls
+          .map((d) => `<li><a href="#${modId}--${slug(d.name!)}"><code>${esc(d.name!)}</code></a></li>`)
+          .join("")}</ul>`
+      : "";
   const itemsHtml = items
     .map((item) => {
       if (typeof (item as DocsSection).section === "string") {
@@ -205,16 +217,19 @@ function renderModule(m: DocsModule): string {
       }
       const d = item as DocsDecl;
       if (!d.name || !d.kind) return "";
-      return `<section class="decl" id="decl-${slug(d.name)}">
+      // Anchor scoped by module: two modules may each expose a `new`, so a bare `decl-new` would
+      // collide across the by-module API reference.
+      return `<section class="decl" id="${modId}--${slug(d.name)}">
         <h3><span class="kind">${esc(d.kind)}</span> <code>${esc(d.name)}</code></h3>
         ${d.signature ? `<pre class="sig"><code>${esc(d.signature)}</code></pre>` : ""}
         ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
       </section>`;
     })
     .join("\n");
-  return `<section class="module" id="mod-${slug(title)}">
+  return `<section class="module" id="mod-${modId}">
     <h2>${esc(title)}${m.file && m.namespace ? ` <span class="muted mono">${esc(m.file)}</span>` : ""}</h2>
     ${m.doc ? `<div class="prose">${md(m.doc)}</div>` : ""}
+    ${toc}
     ${itemsHtml}
   </section>`;
 }
@@ -481,6 +496,8 @@ table.versions tr.here{background:var(--code)}
 ul.deps,.modnav ul{list-style:none;padding:0}ul.deps li{padding:.2rem 0}
 .modnav{background:var(--code);border:1px solid var(--border);border-radius:6px;padding:.6rem 1rem;margin:1rem 0}
 .modnav ul{margin:.4rem 0 0;display:flex;flex-wrap:wrap;gap:.25rem 1rem}
+ul.toc{list-style:none;padding:0;margin:.3rem 0 1.2rem;display:flex;flex-wrap:wrap;gap:.2rem .6rem}
+ul.toc li{padding:0}ul.toc a{color:var(--fg)}
 pre{background:var(--code);border:1px solid var(--border);border-radius:6px;padding:.75rem 1rem;overflow:auto}
 pre code,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em}
 :not(pre)>code{background:var(--code);padding:.1rem .35rem;border-radius:4px}
