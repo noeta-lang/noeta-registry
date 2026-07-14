@@ -47,8 +47,17 @@ Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "s
 200 OK                              idempotent — identical coordinates already published
 409 Conflict                        this version exists with different coordinates (immutable)
 401 Unauthorized / 403 Forbidden    missing/invalid token, or token does not own {company}
+403 Forbidden                       {company} is a reserved built-in namespace (std/noeta/core)
 400 Bad Request                     malformed body / identity / both provenance roots / bad signature
 ```
+
+**Reserved namespaces.** `std`, `noeta`, and `core` are **built-in** scopes: they are provided by
+the Noeta compiler itself and never live in a registry, so they can never be *registered* or
+*published* — a `std/*` release could only be an attempt to shadow core code. The client mirrors this
+(`noeta-pm`'s `reserved` module): it refuses to fetch a built-in scope from *any* registry, so a
+third-party or compromised index can't smuggle a forged `std/*` past a consumer. First-party
+*published* namespaces (e.g. `para`) are resolvable like any package but reserved against open
+self-service claims.
 
 **Provenance (optional, at most one root).** A release may attest its `version → commit` under one
 of two trust roots — never both (a second root is a downgrade surface):

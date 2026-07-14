@@ -37,6 +37,15 @@ const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*\/[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 
+// Reserved built-in namespaces (namespace-protection arc #2) — MUST match noeta-pm's `reserved`
+// module. `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
+// registry, so they can never be registered or published here (a `std/*` release could only be a
+// supply-chain attack trying to shadow core code). First-party *published* namespaces like `para`
+// are resolvable like any package but reserved against open self-service claims — that guard arrives
+// with self-service claiming in namespace-protection #1; admin bootstrap (the first party) may
+// register them today.
+const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -184,6 +193,15 @@ async function getDocs(env: Env, name: string, version: string): Promise<Respons
 
 /** POST — publish a release. Immutable + scope-owned. */
 async function publish(request: Request, env: Env, company: string, name: string): Promise<Response> {
+  // A built-in scope is never a registry package (namespace-protection #2) — refuse before auth so
+  // the endpoint never even implies `std/*` could be owned. No scope is ever registered for these
+  // (registerScope refuses them too), so this is defense in depth, returned as an explicit 403.
+  if (BUILTIN_SCOPES.has(company)) {
+    return json(
+      { error: `\`${company}\` is a reserved built-in namespace and cannot be published to the registry` },
+      403,
+    );
+  }
   const auth = await authorizeScope(request, env, company);
   if (auth instanceof Response) return auth;
 
@@ -316,6 +334,13 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const { scope, token, public_key } = body as Record<string, unknown>;
+  if (typeof scope === "string" && BUILTIN_SCOPES.has(scope)) {
+    // Built-in scopes live in the compiler, not the registry — no token may ever own `std/*`.
+    // (A first-party scope like `para` is intentionally *allowed* here: this endpoint is the admin
+    // bootstrap, i.e. the first party itself. Open self-service claims are where `para` is guarded,
+    // arriving in namespace-protection #1.)
+    return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be registered` }, 403);
+  }
   if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars) }" }, 400);
   }

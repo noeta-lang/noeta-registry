@@ -222,4 +222,34 @@ describe("noeta registry", () => {
     const bad = await post("/packages/acme/z", { version: "not-semver", url: "u", tag: "t", sha: "s" }, TOKEN);
     expect(bad.status).toBe(400);
   });
+
+  // namespace-protection #2 — built-in scopes (std/noeta/core) are toolchain-owned, never registry
+  // packages: unregistrable and unpublishable, so no one can squat `std/extra` or shadow core.
+  it("refuses to register or publish a built-in reserved scope", async () => {
+    for (const scope of ["std", "noeta", "core"]) {
+      // Even the admin cannot register a built-in scope.
+      const reg = await post("/scopes", { scope, token: TOKEN + scope }, ADMIN);
+      expect(reg.status).toBe(403);
+      // And a publish under it is refused (403) regardless of token — the scope can never be owned.
+      const pub = await post(
+        `/packages/${scope}/extra`,
+        { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+        TOKEN,
+      );
+      expect(pub.status).toBe(403);
+    }
+  });
+
+  it("still lets the admin register a first-party scope (para) — reserved only against open claims", async () => {
+    // `para` is a published first-party namespace: the admin bootstrap (the first party) may register
+    // it, and its owner then publishes under it normally. Open self-service claims are guarded in #1.
+    const reg = await post("/scopes", { scope: "para", token: TOKEN + "para" }, ADMIN);
+    expect(reg.status).toBe(201);
+    const pub = await post(
+      "/packages/para/html",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+      TOKEN + "para",
+    );
+    expect(pub.status).toBe(201);
+  });
 });
