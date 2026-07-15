@@ -46,11 +46,15 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 // Reserved namespaces (namespace-protection arcs #2/#1) — MUST match noeta-pm's `reserved` module.
 // `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
 // registry, so they can never be registered, published, or claimed here (a `std/*` release could
-// only be a supply-chain attack trying to shadow core code). First-party *published* namespaces like
-// `para` are resolvable like any package but reserved against open self-service claims — the admin
-// bootstrap (the first party) may register them, but `claimScope` refuses them.
+// only be a supply-chain attack trying to shadow core code).
 const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
-const FIRST_PARTY_SCOPES = new Set(["para"]);
+
+// First-party *published* namespaces → the GitHub org allowed to own them. These are resolvable like
+// any package, but reserved so a random org can't grab the name: unlike an ordinary scope (claimable
+// by the org/user of the *same* name), a first-party scope is claimable only by its **designated
+// org** — `para` only by `noeta-dev`. It still flows through the normal OIDC claim, so the first party
+// needs no admin token; the admin bootstrap remains an escape hatch.
+const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-dev"]]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -392,15 +396,9 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
   ) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars), oidc (JWT) }" }, 400);
   }
-  // Reserved namespaces are never open to self-service claims.
+  // A built-in scope is never claimable — it lives in the compiler, not the registry.
   if (BUILTIN_SCOPES.has(scope)) {
     return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be claimed` }, 403);
-  }
-  if (FIRST_PARTY_SCOPES.has(scope)) {
-    return json(
-      { error: `\`${scope}\` is a reserved first-party namespace and is not open for self-service claims` },
-      403,
-    );
   }
 
   // Authenticate the OIDC token (signature + issuer + audience + expiry).
@@ -411,13 +409,18 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
     return json({ error: `OIDC verification failed: ${err instanceof Error ? err.message : String(err)}` }, 401);
   }
 
-  // Authorize: the anti-squat rule — the scope must be the claimant's own GitHub org/user name.
-  if (claims.repository_owner !== scope) {
+  // Authorize (the anti-squat rule): an ordinary scope is claimable by the org/user of the *same*
+  // name; a reserved first-party scope only by its designated org (so only `noeta-dev` can claim
+  // `para`). Either way, ownership is proven — never a name a random claimant simply asked for.
+  const designatedOwner = FIRST_PARTY_SCOPES.get(scope);
+  const expectedOwner = designatedOwner ?? scope;
+  if (claims.repository_owner !== expectedOwner) {
     return json(
       {
-        error:
-          `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
-          `a scope is claimable only by the org/user of the same name`,
+        error: designatedOwner
+          ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org (not \`${claims.repository_owner}\`)`
+          : `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
+            `a scope is claimable only by the org/user of the same name`,
       },
       403,
     );

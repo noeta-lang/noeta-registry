@@ -132,24 +132,27 @@ Body: { "scope": "acme", "token": "<publish-token>", "oidc": "<GitHub OIDC JWT>"
 201 Created   { "status": "scope claimed",    "scope": "acme", "owner": "acme" }
 200 OK        { "status": "scope re-claimed", "scope": "acme", "owner": "acme" }   // token rotation
 401 Unauthorized   OIDC token missing / expired / wrong issuer|audience / bad signature
-403 Forbidden      scope ≠ token's repository_owner, or a reserved namespace (std/noeta/core/para)
+403 Forbidden      scope not owned by the token's repository_owner, or a built-in namespace (std/noeta/core)
 409 Conflict       scope already owned by another principal (different identity, or the admin)
 400 Bad Request    malformed body
 501 Not Implemented  claiming is not configured on this registry (no OIDC_AUDIENCE)
 ```
 
 The Worker verifies the JWT's signature against the issuer's JWKS and checks issuer, audience, and
-expiry, then requires `scope === repository_owner`. Ownership pins the stable `repository_owner_id`
-claim, so a later **re-claim** (to rotate the publish token) must come from the *same* identity — a
-renamed or transferred org can't silently take a scope over — and an admin-bootstrapped scope is never
-transferred to a claimant. Configure via `OIDC_ISSUER` / `OIDC_JWKS_URL` (default: GitHub Actions) and
-`OIDC_AUDIENCE` (the audience your publishing workflow requests its token for).
+expiry, then applies the anti-squat rule: an **ordinary scope** is claimable by the org/user of the
+*same* name (`scope === repository_owner`); a **reserved first-party scope** only by its *designated
+org* (e.g. `para` only by `noeta-dev`). Ownership pins the stable `repository_owner_id` claim, so a
+later **re-claim** (to rotate the publish token) must come from the *same* identity — a renamed or
+transferred org can't silently take a scope over — and an admin-bootstrapped scope is never
+transferred to a claimant. Built-in namespaces (`std`/`noeta`/`core`) are never claimable. Configure
+via `OIDC_ISSUER` / `OIDC_JWKS_URL` (default: GitHub Actions) and `OIDC_AUDIENCE` (the audience your
+publishing workflow requests its token for).
 
 ## `POST /v1/scopes` *(admin, bootstrap)*
 
 Register a scope's publish token directly. Requires `Authorization: Bearer <ADMIN_TOKEN>` (a Worker
 secret). Body `{ "scope": "acme", "token": "<publish-token>" }`. The token is stored **hashed**
-(SHA-256); publishing presents the raw token and the Worker compares hashes. This is how the first
-party provisions **reserved first-party** namespaces (e.g. `para`) that self-service claiming refuses,
-and remains available as an escape hatch; ordinary users take the OIDC `claim` path above. A built-in
+(SHA-256); publishing presents the raw token and the Worker compares hashes. This is an escape hatch
+for provisioning a scope outside the OIDC flow; ordinary users — and the first party for its own
+reserved namespaces (e.g. `noeta-dev` claiming `para`) — take the OIDC `claim` path above. A built-in
 namespace (`std`/`noeta`/`core`) is refused even here.

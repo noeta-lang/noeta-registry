@@ -93,13 +93,34 @@ describe("self-service scope claiming", () => {
     expect(((await c.json()) as any).error).toContain("cannot claim scope");
   });
 
-  it("never lets a reserved namespace be claimed", async () => {
+  it("never lets a built-in namespace be claimed", async () => {
     for (const scope of ["std", "noeta", "core"]) {
       const oidc = await signJwt(privateKey, claims(scope, "7"));
-      expect((await claim(scope, oidc)).status).toBe(403); // built-in
+      expect((await claim(scope, oidc)).status).toBe(403);
     }
-    const paraTok = await signJwt(privateKey, claims("para", "8"));
-    expect((await claim("para", paraTok)).status).toBe(403); // first-party
+  });
+
+  it("lets a first-party scope be claimed only by its designated org", async () => {
+    // `para` is reserved to `noeta-dev`: another org proving its own identity cannot claim it, even
+    // though its OIDC token verifies — the anti-squat rule uses the designated owner, not the name.
+    const intruder = await signJwt(privateKey, claims("randomcorp", "8"));
+    const denied = await claim("para", intruder);
+    expect(denied.status).toBe(403);
+    expect(((await denied.json()) as any).error).toContain("noeta-dev");
+
+    // The designated org claims it via the ordinary OIDC flow — no admin token.
+    const owner = await signJwt(privateKey, claims("noeta-dev", "5050"));
+    const ok = await claim("para", owner);
+    expect(ok.status).toBe(201);
+    expect(((await ok.json()) as any).owner).toBe("noeta-dev");
+
+    // And the bound token then publishes under `para`.
+    const pub = await SELF.fetch("https://registry.test/v1/packages/para/html", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s" }),
+    });
+    expect(pub.status).toBe(201);
   });
 
   it("rejects an expired or wrong-issuer token (before any JWKS work)", async () => {
