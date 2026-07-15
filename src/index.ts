@@ -12,6 +12,7 @@
 import { handleWeb } from "./web";
 import { oidcConfig, verifyOidc } from "./oidc";
 import { githubConfig, verifyGithubOwnership } from "./github";
+import { domainConfig, verifyDomainOwnership } from "./domain";
 import * as log from "./log";
 import * as advisory from "./advisory";
 
@@ -27,6 +28,9 @@ export interface Env {
   // GitHub REST API base for the laptop (device-flow) claim's ownership check; defaults to
   // https://api.github.com.
   GITHUB_API_URL?: string;
+  // Scheme for the domain-proof well-known fetch (namespace-protection #1); defaults to https. Only a
+  // test double sets it — production always verifies over https.
+  DOMAIN_SCHEME?: string;
   // Transparency log (namespace-protection #1). LOG_PRIVATE_KEY (base64 PKCS8 Ed25519, a secret) signs
   // checkpoints; LOG_PUBLIC_KEY (hex) is served for clients to pin. Absent → checkpoints are 501, but
   // the log is still appended to and proofs are still served.
@@ -478,15 +482,20 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
 async function claimScope(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const { scope, token, oidc, github_token } = body as Record<string, unknown>;
+  const { scope, token, oidc, github_token, domain } = body as Record<string, unknown>;
   if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars), and one proof }" }, 400);
   }
   const hasOidc = typeof oidc === "string" && oidc.length > 0;
   const hasGithub = typeof github_token === "string" && github_token.length > 0;
-  if (hasOidc === hasGithub) {
+  const hasDomain = typeof domain === "string" && domain.length > 0;
+  if ([hasOidc, hasGithub, hasDomain].filter(Boolean).length !== 1) {
     return json(
-      { error: "provide exactly one proof of ownership: `oidc` (CI) or `github_token` (device flow)" },
+      {
+        error:
+          "provide exactly one proof of ownership: `oidc` (CI), `github_token` (device flow), or " +
+          "`domain` (DNS/well-known)",
+      },
       400,
     );
   }
@@ -500,9 +509,33 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
   const designatedOwner = FIRST_PARTY_SCOPES.get(scope);
   const requiredOwner = designatedOwner ?? scope;
 
-  // Verify the presented proof → the required owner's stable GitHub numeric id (shared id space).
+  // Verify the presented proof → an (owner_kind, owner_id) principal. GitHub proofs (OIDC/OAuth) share
+  // the `github` kind + numeric id (interchangeable); a domain proof is the `domain` kind + the domain.
+  let ownerKind: string;
   let ownerId: string;
-  if (hasOidc) {
+  let provenOwner: string; // what to echo as the owner in the response
+  if (hasDomain) {
+    // Domain proof binds the scope to a domain whose first label is the scope; a first-party scope has
+    // a designated *GitHub org*, so it isn't domain-claimable.
+    if (designatedOwner) {
+      return json(
+        {
+          error: `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` GitHub org, not by domain proof`,
+        },
+        403,
+      );
+    }
+    try {
+      ownerId = await verifyDomainOwnership(scope, domain as string, domainConfig(env));
+    } catch (err) {
+      return json(
+        { error: `cannot claim scope \`${scope}\` by domain: ${err instanceof Error ? err.message : String(err)}` },
+        403,
+      );
+    }
+    ownerKind = "domain";
+    provenOwner = ownerId;
+  } else if (hasOidc) {
     const cfg = oidcConfig(env);
     if (!cfg) return json({ error: "OIDC scope claiming is not configured on this registry" }, 501);
     let claims;
@@ -523,6 +556,8 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
       );
     }
     ownerId = claims.repository_owner_id;
+    ownerKind = "github";
+    provenOwner = requiredOwner;
   } else {
     try {
       ownerId = await verifyGithubOwnership(github_token as string, requiredOwner, githubConfig(env));
@@ -537,30 +572,32 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
         403,
       );
     }
+    ownerKind = "github";
+    provenOwner = requiredOwner;
   }
 
   const existing = await env.DB.prepare("SELECT owner_kind, owner_id FROM scopes WHERE scope = ?")
     .bind(scope)
     .first<{ owner_kind: string | null; owner_id: string | null }>();
   if (existing) {
-    // Only the same proven identity may re-claim (to rotate its token). Anything else — an
-    // admin-owned scope, or a different owner_id — is refused; ownership never transfers implicitly.
-    if (existing.owner_kind !== "github" || existing.owner_id !== ownerId) {
+    // Only the same proven principal may re-claim (to rotate its token). Anything else — an
+    // admin-owned scope, a different owner_kind (e.g. a domain trying to take a GitHub-owned scope), or
+    // a different owner_id — is refused; ownership never transfers implicitly.
+    if (existing.owner_kind !== ownerKind || existing.owner_id !== ownerId) {
       return json({ error: `scope \`${scope}\` is already owned by another principal` }, 409);
     }
     await env.DB.prepare("UPDATE scopes SET token_sha = ? WHERE scope = ?")
       .bind(await sha256hex(token), scope)
       .run();
-    return json({ status: "scope re-claimed", scope, owner: requiredOwner }, 200);
+    return json({ status: "scope re-claimed", scope, owner: provenOwner }, 200);
   }
 
   await env.DB.prepare(
-    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) " +
-      "VALUES (?, ?, NULL, 'github', ?, ?)",
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
   )
-    .bind(scope, await sha256hex(token), ownerId, new Date().toISOString())
+    .bind(scope, await sha256hex(token), ownerKind, ownerId, new Date().toISOString())
     .run();
-  return json({ status: "scope claimed", scope, owner: requiredOwner }, 201);
+  return json({ status: "scope claimed", scope, owner: provenOwner }, 201);
 }
 
 /** POST /v1/scopes/{scope}/policy — set a scope's publishing policy (namespace-protection #1,

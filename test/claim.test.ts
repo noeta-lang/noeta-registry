@@ -258,5 +258,75 @@ describe("self-service scope claiming", () => {
       body: JSON.stringify({ scope: "bothproof", token: TOKEN, oidc: "x", github_token: "y" }),
     });
     expect(both.status).toBe(400);
+    // Three proofs at once is also rejected.
+    const three = await SELF.fetch("https://registry.test/v1/scopes/claim", {
+      method: "POST",
+      body: JSON.stringify({ scope: "tri", token: TOKEN, oidc: "x", github_token: "y", domain: "tri.dev" }),
+    });
+    expect(three.status).toBe(400);
+  });
+
+  // --- domain proof (namespace-protection #1, follow-on) -----------------------------------------
+
+  const claimDomain = (scope: string, domain: string, token = TOKEN) =>
+    SELF.fetch("https://registry.test/v1/scopes/claim", {
+      method: "POST",
+      body: JSON.stringify({ scope, token, domain }),
+    });
+
+  // Serve the well-known control file `verifyDomainOwnership` fetches (over https, disableNetConnect).
+  function mockWellKnown(domain: string, body: string | null, status = 200) {
+    const i = fetchMock.get(`https://${domain}`).intercept({ path: "/.well-known/noeta-registry.txt" });
+    if (body === null) i.reply(status, "not found");
+    else i.reply(status, body, { headers: { "content-type": "text/plain" } });
+  }
+
+  it("claims a scope by proving control of the matching domain, then publishes", async () => {
+    mockWellKnown("acme.dev", "noeta-scope=acme\n");
+    const c = await claimDomain("acme", "acme.dev");
+    expect(c.status).toBe(201);
+    expect(((await c.json()) as any).owner).toBe("acme.dev");
+    // The bound token owns the scope end-to-end.
+    const pub = await SELF.fetch("https://registry.test/v1/packages/acme/widgets", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s" }),
+    });
+    expect(pub.status).toBe(201);
+  });
+
+  it("refuses a domain whose first label isn't the scope (anti-squat)", async () => {
+    // Controlling `evil.dev` cannot claim `stripe` — the label must be the scope.
+    const c = await claimDomain("stripe", "evil.dev");
+    expect(c.status).toBe(403);
+    expect(((await c.json()) as any).error).toContain("first label");
+  });
+
+  it("refuses when the well-known file is missing or doesn't bind the scope", async () => {
+    mockWellKnown("missing.dev", null, 404);
+    expect((await claimDomain("missing", "missing.dev")).status).toBe(403);
+    mockWellKnown("nobind.dev", "hello world\n");
+    const c = await claimDomain("nobind", "nobind.dev");
+    expect(c.status).toBe(403);
+    expect(((await c.json()) as any).error).toContain("noeta-scope=nobind");
+  });
+
+  it("re-claims from the same domain but refuses a different owner kind", async () => {
+    mockWellKnown("rotate.dev", "noeta-scope=rotate\n");
+    expect((await claimDomain("rotate", "rotate.dev")).status).toBe(201);
+    // Same domain, new token → re-claim (200).
+    mockWellKnown("rotate.dev", "noeta-scope=rotate\n");
+    expect((await claimDomain("rotate", "rotate.dev", TOKEN + "rot")).status).toBe(200);
+    // A GitHub principal cannot take over a domain-owned scope.
+    const oidc = await signJwt(privateKey, claims("rotate", "12345"));
+    expect((await claim("rotate", oidc)).status).toBe(409);
+  });
+
+  it("refuses domain proof for a reserved first-party scope", async () => {
+    // `para` is claimable only by its designated GitHub org, never by domain.
+    mockWellKnown("para.dev", "noeta-scope=para\n");
+    const c = await claimDomain("para", "para.dev");
+    expect(c.status).toBe(403);
+    expect(((await c.json()) as any).error).toContain("GitHub org");
   });
 });
