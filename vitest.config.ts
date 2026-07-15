@@ -24,6 +24,9 @@ export default defineWorkersConfig(async () => {
               // A fixed Ed25519 keypair for the transparency-log checkpoint signature (test only).
               LOG_PRIVATE_KEY: "MC4CAQAwBQYDK2VwBCIEIF7tVhZn1Nzi0DL/WfLAuN6AhBpBJbvYb3kT/17l/yqV",
               LOG_PUBLIC_KEY: "687d518f510ddd9bc55cdde06bd455bc13aa8793ca244f0f55df4cf70c30ecdb",
+              // A distinct fixed Ed25519 keypair for the advisory feed's signatures (test only).
+              ADVISORY_PRIVATE_KEY: "MC4CAQAwBQYDK2VwBCIEIJmzO//7nVhe4N5KM/SqhjrCTx1y0fOavs1mnc7BbVth",
+              ADVISORY_PUBLIC_KEY: "96985fcd2e6cef8ef8fc8c28351d27b83e0593462016b48e9fa8c4dd10736df4",
             },
           },
         },

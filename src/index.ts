@@ -13,6 +13,7 @@ import { handleWeb } from "./web";
 import { oidcConfig, verifyOidc } from "./oidc";
 import { githubConfig, verifyGithubOwnership } from "./github";
 import * as log from "./log";
+import * as advisory from "./advisory";
 
 export interface Env {
   DB: D1Database;
@@ -31,6 +32,12 @@ export interface Env {
   // the log is still appended to and proofs are still served.
   LOG_PRIVATE_KEY?: string;
   LOG_PUBLIC_KEY?: string;
+  // Security advisory feed (namespace-protection #1). A key distinct from the log key (separate role):
+  // ADVISORY_PRIVATE_KEY (base64 PKCS8 Ed25519, a secret) signs each advisory and the feed head;
+  // ADVISORY_PUBLIC_KEY (hex) is served for clients to pin. Absent → publishing is 403/501, but the
+  // read feed is still served.
+  ADVISORY_PRIVATE_KEY?: string;
+  ADVISORY_PUBLIC_KEY?: string;
 }
 
 interface VersionRow {
@@ -116,6 +123,17 @@ async function route(request: Request, env: Env): Promise<Response> {
     // GET /v1/log/proof/{company}/{package}/{version}
     if (parts.length === 6 && parts[2] === "proof") {
       return log.inclusion(env, `${parts[3]}/${parts[4]}`, parts[5]);
+    }
+  }
+
+  // Security advisory feed (namespace-protection #1).
+  if (parts[1] === "advisories") {
+    // POST /v1/advisories  — publish/update an advisory (admin only)
+    if (parts.length === 2 && request.method === "POST") return advisory.publishAdvisory(request, env);
+    if (request.method === "GET") {
+      if (parts.length === 2) return advisory.listAdvisories(env, url.searchParams.get("since"));
+      if (parts.length === 3 && parts[2] === "checkpoint") return advisory.advisoryCheckpoint(env);
+      if (parts.length === 3 && parts[2] === "key") return advisory.advisoryPublicKey(env);
     }
   }
 
