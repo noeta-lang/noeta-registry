@@ -15,6 +15,19 @@
       "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  // Self-service scope claiming (namespace-protection #1). Issuer/JWKS default to GitHub Actions'
+  // public OIDC provider, so only OIDC_AUDIENCE need be set — the value the publishing workflow must
+  // request its token for (e.g. this registry's hostname). Leaving OIDC_AUDIENCE unset disables
+  // claiming (the admin bootstrap still works).
+  "vars": {
+    "OIDC_ISSUER": "https://token.actions.githubusercontent.com",
+    "OIDC_JWKS_URL": "https://token.actions.githubusercontent.com/.well-known/jwks",
+    "OIDC_AUDIENCE": "noeta-registry"
+  }
   // ADMIN_TOKEN is a secret, not committed: `wrangler secret put ADMIN_TOKEN`.
+  // Transparency-log signing (namespace-protection #1): LOG_PRIVATE_KEY is a secret
+  // (`wrangler secret put LOG_PRIVATE_KEY` — base64 PKCS8 Ed25519); set LOG_PUBLIC_KEY (hex) in `vars`
+  // above to the matching public key so clients can pin it. Without them the log still appends and
+  // serves proofs, but checkpoints return 501.
 }

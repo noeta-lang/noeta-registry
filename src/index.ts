@@ -10,11 +10,38 @@
 // tree of npm deps): plain routing, the Workers `crypto` for token hashing, D1 for storage.
 
 import { handleWeb } from "./web";
+import { oidcConfig, verifyOidc } from "./oidc";
+import { githubConfig, verifyGithubOwnership } from "./github";
+import { domainConfig, verifyDomainOwnership } from "./domain";
+import * as log from "./log";
+import * as advisory from "./advisory";
 
 export interface Env {
   DB: D1Database;
   // A Worker secret; gates the bootstrap `POST /v1/scopes` endpoint.
   ADMIN_TOKEN?: string;
+  // OIDC config for self-service scope claiming (namespace-protection #1). Absent AUDIENCE disables
+  // claiming (see `oidcConfig`). Defaults target GitHub Actions' public issuer.
+  OIDC_ISSUER?: string;
+  OIDC_AUDIENCE?: string;
+  OIDC_JWKS_URL?: string;
+  // GitHub REST API base for the laptop (device-flow) claim's ownership check; defaults to
+  // https://api.github.com.
+  GITHUB_API_URL?: string;
+  // Scheme for the domain-proof well-known fetch (namespace-protection #1); defaults to https. Only a
+  // test double sets it — production always verifies over https.
+  DOMAIN_SCHEME?: string;
+  // Transparency log (namespace-protection #1). LOG_PRIVATE_KEY (base64 PKCS8 Ed25519, a secret) signs
+  // checkpoints; LOG_PUBLIC_KEY (hex) is served for clients to pin. Absent → checkpoints are 501, but
+  // the log is still appended to and proofs are still served.
+  LOG_PRIVATE_KEY?: string;
+  LOG_PUBLIC_KEY?: string;
+  // Security advisory feed (namespace-protection #1). A key distinct from the log key (separate role):
+  // ADVISORY_PRIVATE_KEY (base64 PKCS8 Ed25519, a secret) signs each advisory and the feed head;
+  // ADVISORY_PUBLIC_KEY (hex) is served for clients to pin. Absent → publishing is 403/501, but the
+  // read feed is still served.
+  ADVISORY_PRIVATE_KEY?: string;
+  ADVISORY_PUBLIC_KEY?: string;
 }
 
 interface VersionRow {
@@ -26,6 +53,7 @@ interface VersionRow {
   sig: string | null; // hex Ed25519 signature over the attestation, or null (unsigned)
   bundle: string | null; // JSON Sigstore keyless bundle, or null
   yanked: number;
+  published_at: string; // ISO-8601 UTC publish time (for the client's publish-cooldown window)
 }
 
 interface Dep {
@@ -36,6 +64,19 @@ interface Dep {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*\/[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
+
+// Reserved namespaces (namespace-protection arcs #2/#1) — MUST match noeta-pm's `reserved` module.
+// `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
+// registry, so they can never be registered, published, or claimed here (a `std/*` release could
+// only be a supply-chain attack trying to shadow core code).
+const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
+
+// First-party *published* namespaces → the GitHub org allowed to own them. These are resolvable like
+// any package, but reserved so a random org can't grab the name: unlike an ordinary scope (claimable
+// by the org/user of the *same* name), a first-party scope is claimable only by its **designated
+// org** — `para` only by `noeta-dev`. It still flows through the normal OIDC claim, so the first party
+// needs no admin token; the admin bootstrap remains an escape hatch.
+const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-dev"]]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -64,9 +105,45 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (parts.length === 2 && parts[1] === "scopes" && request.method === "POST") {
     return registerScope(request, env);
   }
+  // POST /v1/scopes/claim  — self-service claim, proven by a GitHub OIDC token
+  if (parts.length === 3 && parts[1] === "scopes" && parts[2] === "claim" && request.method === "POST") {
+    return claimScope(request, env);
+  }
+  // POST /v1/scopes/{scope}/policy  — set the scope's publishing policy (owner-authenticated)
+  if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "policy" && request.method === "POST") {
+    return setScopePolicy(request, env, parts[2]);
+  }
   // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
   if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
     return getScopeKey(env, parts[2]);
+  }
+
+  // Transparency log (namespace-protection #1). All read-only.
+  if (parts[1] === "log" && request.method === "GET") {
+    if (parts.length === 3 && parts[2] === "checkpoint") return log.checkpoint(env);
+    if (parts.length === 3 && parts[2] === "key") return log.publicKey(env);
+    if (parts.length === 3 && parts[2] === "consistency") {
+      return log.consistency(env, url.searchParams.get("from"), url.searchParams.get("to"));
+    }
+    // GET /v1/log/proof/{company}/{package}/{version}
+    if (parts.length === 6 && parts[2] === "proof") {
+      return log.inclusion(env, `${parts[3]}/${parts[4]}`, parts[5]);
+    }
+    // GET /v1/log/advisory/{id} — inclusion proof for an advisory's current leaf
+    if (parts.length === 4 && parts[2] === "advisory") {
+      return advisory.advisoryInclusion(env, parts[3]);
+    }
+  }
+
+  // Security advisory feed (namespace-protection #1).
+  if (parts[1] === "advisories") {
+    // POST /v1/advisories  — publish/update an advisory (admin only)
+    if (parts.length === 2 && request.method === "POST") return advisory.publishAdvisory(request, env);
+    if (request.method === "GET") {
+      if (parts.length === 2) return advisory.listAdvisories(env, url.searchParams.get("since"));
+      if (parts.length === 3 && parts[2] === "checkpoint") return advisory.advisoryCheckpoint(env);
+      if (parts.length === 3 && parts[2] === "key") return advisory.advisoryPublicKey(env);
+    }
   }
 
   // /v1/packages/{company}/{package}[/{version}/yank]
@@ -98,20 +175,29 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, bundle, yanked FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
-  const versions = (results ?? []).map((r) => ({
-    version: r.version,
-    url: r.url,
-    tag: r.tag,
-    sha: r.sha,
-    deps: parseDeps(r.deps),
-    signature: r.sig ?? undefined,
-    bundle: r.bundle ?? undefined,
-    yanked: r.yanked !== 0,
-  }));
+  const versions = (results ?? []).map((r) => {
+    // `published_at` (publish-cooldown, namespace-protection #1): echo the stored ISO timestamp and a
+    // parsed epoch-millis so the client can apply a cooldown window without an ISO-8601 date parser.
+    // A NaN parse (shouldn't happen — the column is NOT NULL ISO) is dropped, treating the release as
+    // undateable (never in cooldown) rather than failing the whole listing.
+    const ms = Date.parse(r.published_at);
+    return {
+      version: r.version,
+      url: r.url,
+      tag: r.tag,
+      sha: r.sha,
+      deps: parseDeps(r.deps),
+      signature: r.sig ?? undefined,
+      bundle: r.bundle ?? undefined,
+      yanked: r.yanked !== 0,
+      published_at: r.published_at,
+      published_at_unix: Number.isNaN(ms) ? undefined : ms,
+    };
+  });
   return json({ name, versions });
 }
 
@@ -184,6 +270,15 @@ async function getDocs(env: Env, name: string, version: string): Promise<Respons
 
 /** POST — publish a release. Immutable + scope-owned. */
 async function publish(request: Request, env: Env, company: string, name: string): Promise<Response> {
+  // A built-in scope is never a registry package (namespace-protection #2) — refuse before auth so
+  // the endpoint never even implies `std/*` could be owned. No scope is ever registered for these
+  // (registerScope refuses them too), so this is defense in depth, returned as an explicit 403.
+  if (BUILTIN_SCOPES.has(company)) {
+    return json(
+      { error: `\`${company}\` is a reserved built-in namespace and cannot be published to the registry` },
+      403,
+    );
+  }
   const auth = await authorizeScope(request, env, company);
   if (auth instanceof Response) return auth;
 
@@ -252,6 +347,24 @@ async function publish(request: Request, env: Env, company: string, name: string
     bundle = rawBundle;
   }
 
+  // Enforce the scope's provenance policy (require-provenance, namespace-protection #1). When on, a
+  // release must carry the required trust root, so a leaked token alone — without the signing key
+  // (`key`) or the OIDC identity behind a bundle (`keyless`) — can't publish. `sig` is already
+  // verified above against the scope's public key, so its presence here means a *valid* signature.
+  const policy = await env.DB.prepare(
+    "SELECT require_provenance, provenance_root FROM scopes WHERE scope = ?",
+  )
+    .bind(company)
+    .first<{ require_provenance: number; provenance_root: string | null }>();
+  if (policy && policy.require_provenance) {
+    const root = policy.provenance_root; // "key" | "keyless" | null (either)
+    const satisfied = root === "key" ? sig !== null : root === "keyless" ? bundle !== null : (sig !== null || bundle !== null);
+    if (!satisfied) {
+      const need = root ? `\`${root}\` provenance` : "signed provenance (a key signature or a keyless bundle)";
+      return json({ error: `scope \`${company}\` requires ${need}; this release carries none` }, 403);
+    }
+  }
+
   const existing = await env.DB.prepare(
     "SELECT url, tag, sha, deps FROM packages WHERE name = ? AND version = ?",
   )
@@ -268,14 +381,33 @@ async function publish(request: Request, env: Env, company: string, name: string
     );
   }
 
-  await env.DB.prepare(
-    "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-  )
-    .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, new Date().toISOString())
-    .run();
+  // Append the release to the transparency log in the same batch as the package row, so the two are
+  // written atomically — a published release is always logged (namespace-protection #1).
+  const now = new Date().toISOString();
+  const record = log.logRecord(name, version, url, tag, sha, await log.provenanceTag(sig, bundle));
+  const { idx, leaf } = await log.prepareEntry(env, record);
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      )
+      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now),
+    env.DB
+      .prepare(
+        "INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(idx, leaf, name, version, record, now),
+  ]);
   return json(
-    { status: "published", name, version, sha, provenance: sig ? "key" : bundle ? "keyless" : "unsigned" },
+    {
+      status: "published",
+      name,
+      version,
+      sha,
+      provenance: sig ? "key" : bundle ? "keyless" : "unsigned",
+      log_index: idx,
+    },
     201,
   );
 }
@@ -316,6 +448,13 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const { scope, token, public_key } = body as Record<string, unknown>;
+  if (typeof scope === "string" && BUILTIN_SCOPES.has(scope)) {
+    // Built-in scopes live in the compiler, not the registry — no token may ever own `std/*`.
+    // (A first-party scope like `para` is intentionally *allowed* here: this endpoint is the admin
+    // bootstrap, i.e. the first party itself. Open self-service claims are where `para` is guarded,
+    // arriving in namespace-protection #1.)
+    return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be registered` }, 403);
+  }
   if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars) }" }, 400);
   }
@@ -324,12 +463,179 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
     return json({ error: "`public_key` must be a 64-char hex Ed25519 public key" }, 400);
   }
   await env.DB.prepare(
-    "INSERT INTO scopes (scope, token_sha, public_key, created_at) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha, public_key = excluded.public_key",
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) " +
+      "VALUES (?, ?, ?, 'admin', NULL, ?) " +
+      "ON CONFLICT(scope) DO UPDATE SET token_sha = excluded.token_sha, public_key = excluded.public_key, " +
+      "owner_kind = 'admin', owner_id = NULL",
   )
     .bind(scope, await sha256hex(token), (public_key as string | undefined) ?? null, new Date().toISOString())
     .run();
   return json({ status: "scope registered", scope }, 201);
+}
+
+/** POST /v1/scopes/claim — self-service scope claiming (namespace-protection #1).
+ *
+ * A scope is claimed by whoever proves they control the GitHub org/user *of the same name* — via a
+ * GitHub Actions **OIDC** token (`oidc`, from CI) or a GitHub OAuth **access token** (`github_token`,
+ * from the laptop device flow). That proof-of-control is the anti-squatting mechanism: you cannot
+ * claim `stripe` unless you are `stripe` (or an admin of the `stripe` org), so popular names can't be
+ * drive-by registered. Both proofs resolve to the owner's **stable GitHub numeric id**, pinned as
+ * `owner_id` under one `owner_kind` (`github`) — so re-claims (token rotation) require the same
+ * identity, a renamed/transferred org can't take a scope over, and the CI and laptop paths are
+ * interchangeable. Reserved namespaces are never claimable here. */
+async function claimScope(request: Request, env: Env): Promise<Response> {
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const { scope, token, oidc, github_token, domain } = body as Record<string, unknown>;
+  if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
+    return json({ error: "body must be { scope (identifier), token (>=16 chars), and one proof }" }, 400);
+  }
+  const hasOidc = typeof oidc === "string" && oidc.length > 0;
+  const hasGithub = typeof github_token === "string" && github_token.length > 0;
+  const hasDomain = typeof domain === "string" && domain.length > 0;
+  if ([hasOidc, hasGithub, hasDomain].filter(Boolean).length !== 1) {
+    return json(
+      {
+        error:
+          "provide exactly one proof of ownership: `oidc` (CI), `github_token` (device flow), or " +
+          "`domain` (DNS/well-known)",
+      },
+      400,
+    );
+  }
+  // A built-in scope is never claimable — it lives in the compiler, not the registry.
+  if (BUILTIN_SCOPES.has(scope)) {
+    return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be claimed` }, 403);
+  }
+
+  // The anti-squat rule: an ordinary scope is claimable by the org/user of the *same* name; a reserved
+  // first-party scope only by its designated org (so only `noeta-dev` can claim `para`).
+  const designatedOwner = FIRST_PARTY_SCOPES.get(scope);
+  const requiredOwner = designatedOwner ?? scope;
+
+  // Verify the presented proof → an (owner_kind, owner_id) principal. GitHub proofs (OIDC/OAuth) share
+  // the `github` kind + numeric id (interchangeable); a domain proof is the `domain` kind + the domain.
+  let ownerKind: string;
+  let ownerId: string;
+  let provenOwner: string; // what to echo as the owner in the response
+  if (hasDomain) {
+    // Domain proof binds the scope to a domain whose first label is the scope; a first-party scope has
+    // a designated *GitHub org*, so it isn't domain-claimable.
+    if (designatedOwner) {
+      return json(
+        {
+          error: `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` GitHub org, not by domain proof`,
+        },
+        403,
+      );
+    }
+    try {
+      ownerId = await verifyDomainOwnership(scope, domain as string, domainConfig(env));
+    } catch (err) {
+      return json(
+        { error: `cannot claim scope \`${scope}\` by domain: ${err instanceof Error ? err.message : String(err)}` },
+        403,
+      );
+    }
+    ownerKind = "domain";
+    provenOwner = ownerId;
+  } else if (hasOidc) {
+    const cfg = oidcConfig(env);
+    if (!cfg) return json({ error: "OIDC scope claiming is not configured on this registry" }, 501);
+    let claims;
+    try {
+      claims = await verifyOidc(oidc as string, cfg);
+    } catch (err) {
+      return json({ error: `OIDC verification failed: ${err instanceof Error ? err.message : String(err)}` }, 401);
+    }
+    if (claims.repository_owner !== requiredOwner) {
+      return json(
+        {
+          error: designatedOwner
+            ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org (not \`${claims.repository_owner}\`)`
+            : `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
+              `a scope is claimable only by the org/user of the same name`,
+        },
+        403,
+      );
+    }
+    ownerId = claims.repository_owner_id;
+    ownerKind = "github";
+    provenOwner = requiredOwner;
+  } else {
+    try {
+      ownerId = await verifyGithubOwnership(github_token as string, requiredOwner, githubConfig(env));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return json(
+        {
+          error: designatedOwner
+            ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org: ${reason}`
+            : `cannot claim scope \`${scope}\`: ${reason}`,
+        },
+        403,
+      );
+    }
+    ownerKind = "github";
+    provenOwner = requiredOwner;
+  }
+
+  const existing = await env.DB.prepare("SELECT owner_kind, owner_id FROM scopes WHERE scope = ?")
+    .bind(scope)
+    .first<{ owner_kind: string | null; owner_id: string | null }>();
+  if (existing) {
+    // Only the same proven principal may re-claim (to rotate its token). Anything else — an
+    // admin-owned scope, a different owner_kind (e.g. a domain trying to take a GitHub-owned scope), or
+    // a different owner_id — is refused; ownership never transfers implicitly.
+    if (existing.owner_kind !== ownerKind || existing.owner_id !== ownerId) {
+      return json({ error: `scope \`${scope}\` is already owned by another principal` }, 409);
+    }
+    await env.DB.prepare("UPDATE scopes SET token_sha = ? WHERE scope = ?")
+      .bind(await sha256hex(token), scope)
+      .run();
+    return json({ status: "scope re-claimed", scope, owner: provenOwner }, 200);
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
+  )
+    .bind(scope, await sha256hex(token), ownerKind, ownerId, new Date().toISOString())
+    .run();
+  return json({ status: "scope claimed", scope, owner: provenOwner }, 201);
+}
+
+/** POST /v1/scopes/{scope}/policy — set a scope's publishing policy (namespace-protection #1,
+ *  require-provenance). Owner-authenticated with the scope's publish token (same auth as publish).
+ *  Body `{ require_provenance: boolean, root?: "key" | "keyless" }`: when on, publishing a release
+ *  that lacks the required provenance is refused, so a leaked token alone can't push. `root` narrows
+ *  which trust root is required; omitted = either a key signature or a keyless bundle satisfies it. */
+async function setScopePolicy(request: Request, env: Env, scope: string): Promise<Response> {
+  if (!IDENT.test(scope)) return json({ error: "scope must be an identifier" }, 400);
+  const auth = await authorizeScope(request, env, scope);
+  if (auth instanceof Response) return auth;
+
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const { require_provenance, root } = body as Record<string, unknown>;
+  if (typeof require_provenance !== "boolean") {
+    return json({ error: "body must be { require_provenance: boolean, root?: \"key\"|\"keyless\" }" }, 400);
+  }
+  let provenanceRoot: string | null = null;
+  if (require_provenance && root !== undefined) {
+    if (root !== "key" && root !== "keyless") {
+      return json({ error: "`root` must be \"key\" or \"keyless\"" }, 400);
+    }
+    provenanceRoot = root;
+  }
+  await env.DB.prepare("UPDATE scopes SET require_provenance = ?, provenance_root = ? WHERE scope = ?")
+    .bind(require_provenance ? 1 : 0, provenanceRoot, scope)
+    .run();
+  return json({
+    status: "policy updated",
+    scope,
+    require_provenance,
+    root: provenanceRoot ?? undefined,
+  });
 }
 
 /** Authorize a publish/yank: the bearer token must own `company`'s scope. */

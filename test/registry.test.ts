@@ -42,6 +42,10 @@ describe("noeta registry", () => {
     expect(body.name).toBe("acme/imgfx");
     expect(body.versions).toHaveLength(1);
     expect(body.versions[0]).toMatchObject({ version: "1.2.0", sha: "e3b0c44", yanked: false });
+    // The publish timestamp is served (as ISO + epoch-millis) for the client's publish-cooldown window.
+    expect(typeof body.versions[0].published_at).toBe("string");
+    expect(typeof body.versions[0].published_at_unix).toBe("number");
+    expect(body.versions[0].published_at_unix).toBeGreaterThan(0);
   });
 
   it("stores and serves per-version dependency metadata", async () => {
@@ -221,5 +225,95 @@ describe("noeta registry", () => {
   it("rejects a malformed publish body", async () => {
     const bad = await post("/packages/acme/z", { version: "not-semver", url: "u", tag: "t", sha: "s" }, TOKEN);
     expect(bad.status).toBe(400);
+  });
+
+  // namespace-protection #2 — built-in scopes (std/noeta/core) are toolchain-owned, never registry
+  // packages: unregistrable and unpublishable, so no one can squat `std/extra` or shadow core.
+  it("refuses to register or publish a built-in reserved scope", async () => {
+    for (const scope of ["std", "noeta", "core"]) {
+      // Even the admin cannot register a built-in scope.
+      const reg = await post("/scopes", { scope, token: TOKEN + scope }, ADMIN);
+      expect(reg.status).toBe(403);
+      // And a publish under it is refused (403) regardless of token — the scope can never be owned.
+      const pub = await post(
+        `/packages/${scope}/extra`,
+        { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+        TOKEN,
+      );
+      expect(pub.status).toBe(403);
+    }
+  });
+
+  it("still lets the admin register a first-party scope (para) — reserved only against open claims", async () => {
+    // `para` is a published first-party namespace: the admin bootstrap (the first party) may register
+    // it, and its owner then publishes under it normally. Open self-service claims are guarded in #1.
+    const reg = await post("/scopes", { scope: "para", token: TOKEN + "para" }, ADMIN);
+    expect(reg.status).toBe(201);
+    const pub = await post(
+      "/packages/para/html",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+      TOKEN + "para",
+    );
+    expect(pub.status).toBe(201);
+  });
+
+  // namespace-protection #1, Phase 1 — require-provenance: a scope owner can demand every release be
+  // signed, so a leaked token alone (without the key / OIDC identity) can no longer publish.
+  it("require-provenance (any root) rejects an unsigned publish and accepts a bundle", async () => {
+    await post("/scopes", { scope: "rp", token: TOKEN + "rp" }, ADMIN);
+    // Only the owner may set the policy.
+    expect((await post("/scopes/rp/policy", { require_provenance: true })).status).toBe(401);
+    expect((await post("/scopes/rp/policy", { require_provenance: true }, "wrong")).status).toBe(403);
+    const set = await post("/scopes/rp/policy", { require_provenance: true }, TOKEN + "rp");
+    expect(set.status).toBe(200);
+
+    // Unsigned is now refused; a keyless bundle satisfies "any root".
+    const unsigned = await post(
+      "/packages/rp/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+      TOKEN + "rp",
+    );
+    expect(unsigned.status).toBe(403);
+    expect(((await unsigned.json()) as any).error).toContain("requires");
+
+    const bundle = JSON.stringify({ dsseEnvelope: { payload: "e30=" } });
+    const signed = await post(
+      "/packages/rp/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", bundle },
+      TOKEN + "rp",
+    );
+    expect(signed.status).toBe(201);
+  });
+
+  it("require-provenance root=key rejects a keyless release and accepts a valid signature", async () => {
+    // A scope pinned to the key root: only a release with a valid Ed25519 signature is accepted — a
+    // keyless bundle (a different, weaker-for-this-scope root) is refused.
+    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const pubRaw = new Uint8Array(
+      (await crypto.subtle.exportKey("raw", (kp as CryptoKeyPair).publicKey)) as ArrayBuffer,
+    );
+    const publicHex = [...pubRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await post("/scopes", { scope: "rpk", token: TOKEN + "rpk", public_key: publicHex }, ADMIN);
+    expect((await post("/scopes/rpk/policy", { require_provenance: true, root: "key" }, TOKEN + "rpk")).status).toBe(200);
+
+    // A keyless bundle does not satisfy a key-root requirement.
+    const bundle = JSON.stringify({ dsseEnvelope: { payload: "e30=" } });
+    const keyless = await post(
+      "/packages/rpk/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", bundle },
+      TOKEN + "rpk",
+    );
+    expect(keyless.status).toBe(403);
+
+    // A valid signature over the canonical attestation does.
+    const msg = new TextEncoder().encode("noeta-attestation-v1\nrpk/a\n1.0.0\nabc\n");
+    const sigRaw = new Uint8Array(await crypto.subtle.sign("Ed25519", (kp as CryptoKeyPair).privateKey, msg));
+    const signature = [...sigRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const ok = await post(
+      "/packages/rpk/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", signature },
+      TOKEN + "rpk",
+    );
+    expect(ok.status).toBe(201);
   });
 });
