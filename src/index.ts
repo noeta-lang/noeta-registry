@@ -12,6 +12,7 @@
 import { handleWeb } from "./web";
 import { oidcConfig, verifyOidc } from "./oidc";
 import { githubConfig, verifyGithubOwnership } from "./github";
+import * as log from "./log";
 
 export interface Env {
   DB: D1Database;
@@ -25,6 +26,11 @@ export interface Env {
   // GitHub REST API base for the laptop (device-flow) claim's ownership check; defaults to
   // https://api.github.com.
   GITHUB_API_URL?: string;
+  // Transparency log (namespace-protection #1). LOG_PRIVATE_KEY (base64 PKCS8 Ed25519, a secret) signs
+  // checkpoints; LOG_PUBLIC_KEY (hex) is served for clients to pin. Absent → checkpoints are 501, but
+  // the log is still appended to and proofs are still served.
+  LOG_PRIVATE_KEY?: string;
+  LOG_PUBLIC_KEY?: string;
 }
 
 interface VersionRow {
@@ -98,6 +104,19 @@ async function route(request: Request, env: Env): Promise<Response> {
   // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
   if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
     return getScopeKey(env, parts[2]);
+  }
+
+  // Transparency log (namespace-protection #1). All read-only.
+  if (parts[1] === "log" && request.method === "GET") {
+    if (parts.length === 3 && parts[2] === "checkpoint") return log.checkpoint(env);
+    if (parts.length === 3 && parts[2] === "key") return log.publicKey(env);
+    if (parts.length === 3 && parts[2] === "consistency") {
+      return log.consistency(env, url.searchParams.get("from"), url.searchParams.get("to"));
+    }
+    // GET /v1/log/proof/{company}/{package}/{version}
+    if (parts.length === 6 && parts[2] === "proof") {
+      return log.inclusion(env, `${parts[3]}/${parts[4]}`, parts[5]);
+    }
   }
 
   // /v1/packages/{company}/{package}[/{version}/yank]
@@ -326,14 +345,33 @@ async function publish(request: Request, env: Env, company: string, name: string
     );
   }
 
-  await env.DB.prepare(
-    "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
-  )
-    .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, new Date().toISOString())
-    .run();
+  // Append the release to the transparency log in the same batch as the package row, so the two are
+  // written atomically — a published release is always logged (namespace-protection #1).
+  const now = new Date().toISOString();
+  const record = log.logRecord(name, version, url, tag, sha, await log.provenanceTag(sig, bundle));
+  const { idx, leaf } = await log.prepareEntry(env, record);
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+      )
+      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now),
+    env.DB
+      .prepare(
+        "INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(idx, leaf, name, version, record, now),
+  ]);
   return json(
-    { status: "published", name, version, sha, provenance: sig ? "key" : bundle ? "keyless" : "unsigned" },
+    {
+      status: "published",
+      name,
+      version,
+      sha,
+      provenance: sig ? "key" : bundle ? "keyless" : "unsigned",
+      log_index: idx,
+    },
     201,
   );
 }

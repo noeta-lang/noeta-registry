@@ -21,6 +21,9 @@ export default defineWorkersConfig(async () => {
               OIDC_AUDIENCE: "noeta-registry",
               OIDC_JWKS_URL: "https://oidc.test/jwks",
               GITHUB_API_URL: "https://gh-api.test",
+              // A fixed Ed25519 keypair for the transparency-log checkpoint signature (test only).
+              LOG_PRIVATE_KEY: "MC4CAQAwBQYDK2VwBCIEIF7tVhZn1Nzi0DL/WfLAuN6AhBpBJbvYb3kT/17l/yqV",
+              LOG_PUBLIC_KEY: "687d518f510ddd9bc55cdde06bd455bc13aa8793ca244f0f55df4cf70c30ecdb",
             },
           },
         },

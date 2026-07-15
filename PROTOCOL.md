@@ -188,3 +188,52 @@ secret). Body `{ "scope": "acme", "token": "<publish-token>" }`. The token is st
 for provisioning a scope outside the OIDC flow; ordinary users — and the first party for its own
 reserved namespaces (e.g. `noeta-dev` claiming `para`) — take the OIDC `claim` path above. A built-in
 namespace (`std`/`noeta`/`core`) is refused even here.
+
+## Transparency log
+
+Every published release is appended to an **append-only, tamper-evident log** — an RFC 6962 Merkle
+tree — so a client can verify, without trusting the registry, that a release is logged (**inclusion**)
+and that the log was only ever appended to, never rewritten (**consistency**). Together these stop a
+compromised registry from *equivocating* — serving one history to one client and a different one to
+another. Publishing echoes the release's `log_index`. All log reads are `GET` and unauthenticated.
+
+### `GET /v1/log/checkpoint` — the signed tree head
+
+```
+200 OK   { "tree_size": 42, "root_hash": "<hex>", "signature": "<hex Ed25519>" }
+501      the log is not configured (no signing key)
+```
+
+The signature is over the canonical bytes `noeta-log-checkpoint-v1\n{tree_size}\n{root_hash}\n`,
+signed with the log's Ed25519 key. A client **pins** the log's public key and verifies every checkpoint
+against it.
+
+### `GET /v1/log/key` — the log's public key
+
+`200 OK { "public_key": "<64-hex Ed25519>" }` (or `404` if unset). What a client pins.
+
+### `GET /v1/log/proof/{company}/{package}/{version}` — inclusion proof
+
+```
+200 OK   { "index": 7, "tree_size": 42, "root_hash": "<hex>",
+           "record": "<canonical leaf record>", "proof": ["<hex>", …] }
+404      that release is not in the log
+```
+
+The client recomputes the leaf hash from `record` — the canonical
+`noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n` — and verifies the
+audit `proof` reconstructs `root_hash`, which must match a signed checkpoint. `provenance` is
+`key:{sig}`, `keyless:{sha256(bundle)}`, or `unsigned`.
+
+### `GET /v1/log/consistency?from={m}&to={n}` — consistency proof
+
+```
+200 OK   { "from": 30, "to": 42, "root_from": "<hex>", "root_to": "<hex>", "proof": ["<hex>", …] }
+400      unless 1 ≤ from ≤ to ≤ tree_size
+```
+
+Proves the tree of size `from` is a prefix of the tree of size `to` (append-only). A client that pinned
+an earlier checkpoint fetches this against a newer one to confirm the registry didn't rewrite history.
+
+Configure signing via `LOG_PRIVATE_KEY` (base64 PKCS8 Ed25519, a Worker secret) and `LOG_PUBLIC_KEY`
+(hex). Without them the log is still appended to and proofs are served, but checkpoints return `501`.
