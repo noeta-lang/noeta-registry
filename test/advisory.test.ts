@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { fromHex, toHex } from "../src/merkle";
+import { fromHex, leafHash, toHex, verifyInclusion } from "../src/merkle";
 
 const ADMIN = "test-admin-token";
 const PUB = "96985fcd2e6cef8ef8fc8c28351d27b83e0593462016b48e9fa8c4dd10736df4";
@@ -121,5 +121,49 @@ describe("advisory feed", () => {
     expect((await post("/advisories", { ...ADVISORY, severity: "spicy" }, ADMIN)).status).toBe(400);
     expect((await post("/advisories", { ...ADVISORY, summary: "line\nbreak" }, ADMIN)).status).toBe(400);
     expect((await post("/advisories", { ...ADVISORY, ranges: "" }, ADMIN)).status).toBe(400);
+  });
+
+  // --- transparency-log binding (namespace-protection #1, advisory-log follow-on) ----------------
+
+  it("binds the advisory into the transparency log and proves its inclusion", async () => {
+    // The seeded advisory is leaf 0; publish echoes the index and the feed carries it.
+    const { advisories } = await getJson("/advisories");
+    const a = advisories[0];
+    expect(a.log_index).toBe(0);
+
+    // Its inclusion proof verifies against the signed checkpoint's root.
+    const proof = await getJson(`/log/advisory/${a.id}`);
+    const cp = await getJson("/log/checkpoint");
+    expect(proof.root_hash).toBe(cp.root_hash);
+    // The logged record is exactly this advisory's canonical bytes.
+    expect(proof.record).toBe(new TextDecoder().decode(await canonicalBytes(a)));
+    const leaf = await leafHash(new TextEncoder().encode(proof.record));
+    const ok = await verifyInclusion(
+      leaf,
+      proof.index,
+      proof.tree_size,
+      proof.proof.map((h: string) => fromHex(h)),
+      fromHex(proof.root_hash),
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("appends a new leaf when an advisory is updated (append-only history)", async () => {
+    const before = await getJson("/log/checkpoint");
+    // Withdraw the seeded advisory — a new leaf, the old one stays.
+    expect((await post("/advisories", { ...ADVISORY, withdrawn: true }, ADMIN)).status).toBe(201);
+    const after = await getJson("/log/checkpoint");
+    expect(after.tree_size).toBe(before.tree_size + 1);
+    // The advisory's current proof reflects the withdrawn state.
+    const { advisories } = await getJson("/advisories");
+    const a = advisories.find((x: any) => x.id === ADVISORY.id);
+    expect(a.withdrawn).toBe(true);
+    const proof = await getJson(`/log/advisory/${a.id}`);
+    expect(proof.record).toContain("withdrawn");
+    expect(proof.index).toBe(a.log_index);
+  });
+
+  it("404s an inclusion proof for an unknown advisory", async () => {
+    expect((await get("/log/advisory/NOETA-9999-9999")).status).toBe(404);
   });
 });

@@ -94,6 +94,25 @@ export async function inclusion(env: LogEnv, name: string, version: string): Pro
   });
 }
 
+/** An inclusion proof for the leaf at an explicit `idx` (used for non-release leaves like advisories,
+ *  which are looked up by their stored log index rather than by name/version). */
+export async function inclusionAtIndex(env: LogEnv, idx: number): Promise<Response> {
+  const row = await env.DB.prepare("SELECT record FROM log WHERE idx = ?")
+    .bind(idx)
+    .first<{ record: string }>();
+  if (!row) return json({ error: `no transparency-log entry at index ${idx}` }, 404);
+  const leaves = await allLeaves(env);
+  const proof = await inclusionProof(leaves, idx);
+  const root = await merkleRoot(leaves);
+  return json({
+    index: idx,
+    tree_size: leaves.length,
+    root_hash: toHex(root),
+    record: row.record,
+    proof: proof.map(toHex),
+  });
+}
+
 /** A consistency proof that the log at size `from` is a prefix of the log at size `to` — the
  *  append-only guarantee across two checkpoints a client has seen. */
 export async function consistency(env: LogEnv, fromParam: string | null, toParam: string | null): Promise<Response> {

@@ -12,6 +12,7 @@
 // advisories simply won't verify client-side).
 
 import { toHex } from "./merkle";
+import * as log from "./log";
 
 const ADVISORY_PREFIX = "noeta-advisory-v1";
 const FEED_PREFIX = "noeta-advisory-feed-v1";
@@ -37,6 +38,7 @@ interface AdvisoryRow {
   withdrawn: number;
   seq: number;
   signature: string;
+  log_index: number | null;
 }
 
 /** The security-relevant fields of an advisory, in the exact byte layout that is signed — reproduced
@@ -44,7 +46,7 @@ interface AdvisoryRow {
  *  sides. `details` is folded in as a SHA-256 digest (it may be multi-line; everything else is
  *  newline-free and validated so). `state` binds the withdrawn flag, so a registry can't silently
  *  un-retract an advisory under the same signature. */
-async function canonicalBytes(a: {
+interface AdvisoryFields {
   id: string;
   package: string;
   ranges: string;
@@ -53,13 +55,21 @@ async function canonicalBytes(a: {
   summary: string;
   details: string;
   url: string;
-}): Promise<Uint8Array> {
+}
+
+/** The canonical text form — also the exact record stored as the advisory's transparency-log leaf, so
+ *  the leaf's inclusion binds this precise advisory state. */
+async function canonicalText(a: AdvisoryFields): Promise<string> {
   const detailsHash = await sha256hex(a.details);
   const state = a.withdrawn ? "withdrawn" : "active";
-  const text =
+  return (
     `${ADVISORY_PREFIX}\n${a.id}\n${a.package}\n${a.ranges}\n${a.severity}\n` +
-    `${state}\n${a.summary}\n${detailsHash}\n${a.url}\n`;
-  return new TextEncoder().encode(text);
+    `${state}\n${a.summary}\n${detailsHash}\n${a.url}\n`
+  );
+}
+
+async function canonicalBytes(a: AdvisoryFields): Promise<Uint8Array> {
+  return new TextEncoder().encode(await canonicalText(a));
 }
 
 /** The signed feed head (RFC-6962-style signed tree head, adapted): the advisory count plus a digest
@@ -147,28 +157,46 @@ export async function publishAdvisory(request: Request, env: AdvisoryEnv): Promi
     return json({ error: "`patched` must be single-line or omitted" }, 400);
   }
 
-  const signature = toHex(
-    new Uint8Array(
-      await sign(env.ADVISORY_PRIVATE_KEY, await canonicalBytes({
-        id, package: pkg, ranges, severity, withdrawn, summary, details, url,
-      })),
-    ),
-  );
+  const fields: AdvisoryFields = { id, package: pkg, ranges, severity, withdrawn, summary, details, url };
+  const record = await canonicalText(fields);
+  const signature = toHex(new Uint8Array(await sign(env.ADVISORY_PRIVATE_KEY, new TextEncoder().encode(record))));
 
   const now = new Date().toISOString();
   const nextSeq = ((
     await env.DB.prepare("SELECT COALESCE(MAX(seq) + 1, 0) AS next FROM advisories").first<{ next: number }>()
   )?.next ?? 0);
-  await env.DB.prepare(
-    "INSERT INTO advisories (id, package, ranges, patched, severity, summary, details, url, withdrawn, seq, signature, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET package = excluded.package, ranges = excluded.ranges, patched = excluded.patched, " +
-      "severity = excluded.severity, summary = excluded.summary, details = excluded.details, url = excluded.url, " +
-      "withdrawn = excluded.withdrawn, seq = excluded.seq, signature = excluded.signature, updated_at = excluded.updated_at",
-  )
-    .bind(id, pkg, ranges, patched, severity, summary, details, url, withdrawn ? 1 : 0, nextSeq, signature, now, now)
-    .run();
-  return json({ status: "advisory published", id, seq: nextSeq }, 201);
+  // Bind this issuance into the transparency log: the leaf's record is the advisory's canonical bytes,
+  // so its inclusion (and each later state, e.g. a withdrawal) is permanent and consistency-covered,
+  // exactly like a release. Advisory row + log leaf are written atomically in one batch.
+  const { idx, leaf } = await log.prepareEntry(env, record);
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        "INSERT INTO advisories (id, package, ranges, patched, severity, summary, details, url, withdrawn, seq, signature, log_index, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET package = excluded.package, ranges = excluded.ranges, patched = excluded.patched, " +
+          "severity = excluded.severity, summary = excluded.summary, details = excluded.details, url = excluded.url, " +
+          "withdrawn = excluded.withdrawn, seq = excluded.seq, signature = excluded.signature, log_index = excluded.log_index, " +
+          "updated_at = excluded.updated_at",
+      )
+      .bind(id, pkg, ranges, patched, severity, summary, details, url, withdrawn ? 1 : 0, nextSeq, signature, idx, now, now),
+    env.DB
+      .prepare("INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(idx, leaf, `advisory:${id}`, String(nextSeq), record, now),
+  ]);
+  return json({ status: "advisory published", id, seq: nextSeq, log_index: idx }, 201);
+}
+
+/** GET /v1/log/advisory/{id} — the inclusion proof for an advisory's current log leaf, so a client can
+ *  verify (against the signed checkpoint) that the advisory it was served is the one in the log. */
+export async function advisoryInclusion(env: AdvisoryEnv, id: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT log_index FROM advisories WHERE id = ?")
+    .bind(id)
+    .first<{ log_index: number | null }>();
+  if (!row || row.log_index === null) {
+    return json({ error: `advisory \`${id}\` is not in the transparency log` }, 404);
+  }
+  return log.inclusionAtIndex(env, row.log_index);
 }
 
 /** GET /v1/advisories[?since=seq] — the advisory feed. `since` returns only entries with a strictly
@@ -221,6 +249,7 @@ function toWire(r: AdvisoryRow) {
     withdrawn: r.withdrawn !== 0,
     seq: r.seq,
     signature: r.signature,
+    log_index: r.log_index ?? undefined,
   };
 }
 

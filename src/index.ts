@@ -129,6 +129,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (parts.length === 6 && parts[2] === "proof") {
       return log.inclusion(env, `${parts[3]}/${parts[4]}`, parts[5]);
     }
+    // GET /v1/log/advisory/{id} — inclusion proof for an advisory's current leaf
+    if (parts.length === 4 && parts[2] === "advisory") {
+      return advisory.advisoryInclusion(env, parts[3]);
+    }
   }
 
   // Security advisory feed (namespace-protection #1).
