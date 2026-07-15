@@ -11,6 +11,7 @@
 
 import { handleWeb } from "./web";
 import { oidcConfig, verifyOidc } from "./oidc";
+import { githubConfig, verifyGithubOwnership } from "./github";
 
 export interface Env {
   DB: D1Database;
@@ -21,6 +22,9 @@ export interface Env {
   OIDC_ISSUER?: string;
   OIDC_AUDIENCE?: string;
   OIDC_JWKS_URL?: string;
+  // GitHub REST API base for the laptop (device-flow) claim's ownership check; defaults to
+  // https://api.github.com.
+  GITHUB_API_URL?: string;
 }
 
 interface VersionRow {
@@ -397,57 +401,77 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
 
 /** POST /v1/scopes/claim — self-service scope claiming (namespace-protection #1).
  *
- * Instead of an admin handing out tokens, a scope is claimed by whoever proves — via a GitHub Actions
- * OIDC token — that they control the GitHub org/user *of the same name*. That proof-of-control is the
- * anti-squatting mechanism: you cannot claim `stripe` unless your OIDC token's `repository_owner` is
- * `stripe`, so popular names can't be drive-by registered. Ownership pins the stable
- * `repository_owner_id`, so re-claims (token rotation) require the same identity, and a renamed or
- * transferred org can't silently take a scope over. Reserved namespaces are never claimable here. */
+ * A scope is claimed by whoever proves they control the GitHub org/user *of the same name* — via a
+ * GitHub Actions **OIDC** token (`oidc`, from CI) or a GitHub OAuth **access token** (`github_token`,
+ * from the laptop device flow). That proof-of-control is the anti-squatting mechanism: you cannot
+ * claim `stripe` unless you are `stripe` (or an admin of the `stripe` org), so popular names can't be
+ * drive-by registered. Both proofs resolve to the owner's **stable GitHub numeric id**, pinned as
+ * `owner_id` under one `owner_kind` (`github`) — so re-claims (token rotation) require the same
+ * identity, a renamed/transferred org can't take a scope over, and the CI and laptop paths are
+ * interchangeable. Reserved namespaces are never claimable here. */
 async function claimScope(request: Request, env: Env): Promise<Response> {
-  const cfg = oidcConfig(env);
-  if (!cfg) {
-    return json({ error: "self-service scope claiming is not configured on this registry" }, 501);
-  }
   const body = await readJson(request);
   if (body instanceof Response) return body;
-  const { scope, token, oidc } = body as Record<string, unknown>;
-  if (
-    typeof scope !== "string" || !IDENT.test(scope) ||
-    typeof token !== "string" || token.length < 16 ||
-    typeof oidc !== "string" || oidc.length === 0
-  ) {
-    return json({ error: "body must be { scope (identifier), token (>=16 chars), oidc (JWT) }" }, 400);
+  const { scope, token, oidc, github_token } = body as Record<string, unknown>;
+  if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
+    return json({ error: "body must be { scope (identifier), token (>=16 chars), and one proof }" }, 400);
+  }
+  const hasOidc = typeof oidc === "string" && oidc.length > 0;
+  const hasGithub = typeof github_token === "string" && github_token.length > 0;
+  if (hasOidc === hasGithub) {
+    return json(
+      { error: "provide exactly one proof of ownership: `oidc` (CI) or `github_token` (device flow)" },
+      400,
+    );
   }
   // A built-in scope is never claimable — it lives in the compiler, not the registry.
   if (BUILTIN_SCOPES.has(scope)) {
     return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be claimed` }, 403);
   }
 
-  // Authenticate the OIDC token (signature + issuer + audience + expiry).
-  let claims;
-  try {
-    claims = await verifyOidc(oidc, cfg);
-  } catch (err) {
-    return json({ error: `OIDC verification failed: ${err instanceof Error ? err.message : String(err)}` }, 401);
-  }
-
-  // Authorize (the anti-squat rule): an ordinary scope is claimable by the org/user of the *same*
-  // name; a reserved first-party scope only by its designated org (so only `noeta-dev` can claim
-  // `para`). Either way, ownership is proven — never a name a random claimant simply asked for.
+  // The anti-squat rule: an ordinary scope is claimable by the org/user of the *same* name; a reserved
+  // first-party scope only by its designated org (so only `noeta-dev` can claim `para`).
   const designatedOwner = FIRST_PARTY_SCOPES.get(scope);
-  const expectedOwner = designatedOwner ?? scope;
-  if (claims.repository_owner !== expectedOwner) {
-    return json(
-      {
-        error: designatedOwner
-          ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org (not \`${claims.repository_owner}\`)`
-          : `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
-            `a scope is claimable only by the org/user of the same name`,
-      },
-      403,
-    );
+  const requiredOwner = designatedOwner ?? scope;
+
+  // Verify the presented proof → the required owner's stable GitHub numeric id (shared id space).
+  let ownerId: string;
+  if (hasOidc) {
+    const cfg = oidcConfig(env);
+    if (!cfg) return json({ error: "OIDC scope claiming is not configured on this registry" }, 501);
+    let claims;
+    try {
+      claims = await verifyOidc(oidc as string, cfg);
+    } catch (err) {
+      return json({ error: `OIDC verification failed: ${err instanceof Error ? err.message : String(err)}` }, 401);
+    }
+    if (claims.repository_owner !== requiredOwner) {
+      return json(
+        {
+          error: designatedOwner
+            ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org (not \`${claims.repository_owner}\`)`
+            : `your GitHub identity \`${claims.repository_owner}\` cannot claim scope \`${scope}\` — ` +
+              `a scope is claimable only by the org/user of the same name`,
+        },
+        403,
+      );
+    }
+    ownerId = claims.repository_owner_id;
+  } else {
+    try {
+      ownerId = await verifyGithubOwnership(github_token as string, requiredOwner, githubConfig(env));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return json(
+        {
+          error: designatedOwner
+            ? `\`${scope}\` is a reserved first-party namespace, claimable only by the \`${designatedOwner}\` org: ${reason}`
+            : `cannot claim scope \`${scope}\`: ${reason}`,
+        },
+        403,
+      );
+    }
   }
-  const ownerId = claims.repository_owner_id;
 
   const existing = await env.DB.prepare("SELECT owner_kind, owner_id FROM scopes WHERE scope = ?")
     .bind(scope)
@@ -455,22 +479,22 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
   if (existing) {
     // Only the same proven identity may re-claim (to rotate its token). Anything else — an
     // admin-owned scope, or a different owner_id — is refused; ownership never transfers implicitly.
-    if (existing.owner_kind !== "github-oidc" || existing.owner_id !== ownerId) {
+    if (existing.owner_kind !== "github" || existing.owner_id !== ownerId) {
       return json({ error: `scope \`${scope}\` is already owned by another principal` }, 409);
     }
     await env.DB.prepare("UPDATE scopes SET token_sha = ? WHERE scope = ?")
       .bind(await sha256hex(token), scope)
       .run();
-    return json({ status: "scope re-claimed", scope, owner: claims.repository_owner }, 200);
+    return json({ status: "scope re-claimed", scope, owner: requiredOwner }, 200);
   }
 
   await env.DB.prepare(
     "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) " +
-      "VALUES (?, ?, NULL, 'github-oidc', ?, ?)",
+      "VALUES (?, ?, NULL, 'github', ?, ?)",
   )
     .bind(scope, await sha256hex(token), ownerId, new Date().toISOString())
     .run();
-  return json({ status: "scope claimed", scope, owner: claims.repository_owner }, 201);
+  return json({ status: "scope claimed", scope, owner: requiredOwner }, 201);
 }
 
 /** POST /v1/scopes/{scope}/policy — set a scope's publishing policy (namespace-protection #1,

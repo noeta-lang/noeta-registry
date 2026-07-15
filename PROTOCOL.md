@@ -121,33 +121,42 @@ Serve a release's stored documentation artifact **verbatim** (the `docs.json`, n
 404 Not Found   no docs stored for this (name, version)
 ```
 
-## `POST /v1/scopes/claim` — self-service scope claim (OIDC-proven)
+## `POST /v1/scopes/claim` — self-service scope claim (GitHub-proven)
 
-Claim a scope by **proving you control the GitHub org/user of the same name**, via a GitHub Actions
-OIDC token. This is the scalable, admin-free path to ownership, and its proof-of-control is the
-anti-squatting mechanism — you cannot claim `stripe` unless your OIDC token says you *are* `stripe`.
+Claim a scope by **proving you control the GitHub org/user of the same name**. Two proofs, one from
+each environment — provide **exactly one**:
+- `oidc` — a GitHub Actions **OIDC token** (from CI). The scalable, admin-free path.
+- `github_token` — a GitHub OAuth **access token** (from the laptop device flow), for claiming off-CI.
+
+Either way the proof-of-control is the anti-squatting mechanism — you cannot claim `stripe` unless you
+*are* `stripe` (or an admin of the `stripe` org).
 
 ```
-Body: { "scope": "acme", "token": "<publish-token>", "oidc": "<GitHub OIDC JWT>" }
+Body: { "scope": "acme", "token": "<publish-token>",
+        "oidc": "<GitHub OIDC JWT>" | "github_token": "<GitHub OAuth token>" }   // exactly one
 
 201 Created   { "status": "scope claimed",    "scope": "acme", "owner": "acme" }
 200 OK        { "status": "scope re-claimed", "scope": "acme", "owner": "acme" }   // token rotation
 401 Unauthorized   OIDC token missing / expired / wrong issuer|audience / bad signature
-403 Forbidden      scope not owned by the token's repository_owner, or a built-in namespace (std/noeta/core)
+403 Forbidden      not the org/user's owner (OIDC), not its admin (OAuth), or a built-in namespace
 409 Conflict       scope already owned by another principal (different identity, or the admin)
-400 Bad Request    malformed body
-501 Not Implemented  claiming is not configured on this registry (no OIDC_AUDIENCE)
+400 Bad Request    malformed body / not exactly one proof
+501 Not Implemented  OIDC claiming is not configured on this registry (no OIDC_AUDIENCE)
 ```
 
-The Worker verifies the JWT's signature against the issuer's JWKS and checks issuer, audience, and
-expiry, then applies the anti-squat rule: an **ordinary scope** is claimable by the org/user of the
-*same* name (`scope === repository_owner`); a **reserved first-party scope** only by its *designated
-org* (e.g. `para` only by `noeta-dev`). Ownership pins the stable `repository_owner_id` claim, so a
-later **re-claim** (to rotate the publish token) must come from the *same* identity — a renamed or
-transferred org can't silently take a scope over — and an admin-bootstrapped scope is never
-transferred to a claimant. Built-in namespaces (`std`/`noeta`/`core`) are never claimable. Configure
-via `OIDC_ISSUER` / `OIDC_JWKS_URL` (default: GitHub Actions) and `OIDC_AUDIENCE` (the audience your
-publishing workflow requests its token for).
+For **OIDC**, the Worker verifies the JWT against the issuer's JWKS (issuer/audience/expiry) and
+requires `repository_owner` to be the scope. For **OAuth**, it calls the GitHub API (`/user`, and for
+an org `/user/memberships/orgs/{org}` — needs `read:org`) to confirm the token holder is the scope's
+user or an active admin of the org. A **reserved first-party scope** is claimable only by its
+*designated org* (e.g. `para` only by `noeta-dev`).
+
+Both proofs resolve to the owner's **stable GitHub numeric id**, pinned as `owner_id` under one
+`owner_kind` (`github`) — so a scope claimed from CI and re-claimed from a laptop are one identity
+(the paths are interchangeable), a later **re-claim** (to rotate the publish token) must come from that
+*same* identity, a renamed/transferred org can't take a scope over, and an admin-bootstrapped scope is
+never transferred to a claimant. Built-in namespaces (`std`/`noeta`/`core`) are never claimable.
+Configure via `OIDC_ISSUER` / `OIDC_JWKS_URL` / `OIDC_AUDIENCE` (OIDC) and `GITHUB_API_URL` (OAuth,
+default `https://api.github.com`).
 
 ## `POST /v1/scopes/{scope}/policy` — set a scope's publishing policy
 

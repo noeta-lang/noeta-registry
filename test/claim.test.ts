@@ -47,6 +47,27 @@ const claim = (scope: string, oidc: string, token = TOKEN) =>
     body: JSON.stringify({ scope, token, oidc }),
   });
 
+// The laptop (device-flow) path: a GitHub OAuth access token instead of an OIDC JWT.
+const claimGithub = (scope: string, githubToken: string, token = TOKEN) =>
+  SELF.fetch("https://registry.test/v1/scopes/claim", {
+    method: "POST",
+    body: JSON.stringify({ scope, token, github_token: githubToken }),
+  });
+
+// One-shot mocks of the GitHub REST calls verifyGithubOwnership makes (GITHUB_API_URL = gh-api.test).
+function mockGithubUser(login: string, id: number) {
+  fetchMock
+    .get("https://gh-api.test")
+    .intercept({ path: "/user" })
+    .reply(200, JSON.stringify({ login, id }), { headers: { "content-type": "application/json" } });
+}
+function mockGithubMembership(org: string, body: unknown, status = 200) {
+  fetchMock
+    .get("https://gh-api.test")
+    .intercept({ path: `/user/memberships/orgs/${org}` })
+    .reply(status, JSON.stringify(body), { headers: { "content-type": "application/json" } });
+}
+
 beforeAll(async () => {
   const kp = (await crypto.subtle.generateKey(
     { name: "RSASSA-PKCS1-v1_5", modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: "SHA-256" },
@@ -167,5 +188,75 @@ describe("self-service scope claiming", () => {
     expect(reg.status).toBe(201);
     const c = await claim("firstparty", await signJwt(privateKey, claims("firstparty", "3003")));
     expect(c.status).toBe(409);
+  });
+
+  // --- Laptop (GitHub OAuth device-flow) claiming ------------------------------------------------
+
+  it("claims a personal scope with a GitHub token whose login matches", async () => {
+    mockGithubUser("lapuser", 7001); // token holder == the scope
+    const c = await claimGithub("lapuser", "gho_devicetoken");
+    expect(c.status).toBe(201);
+    expect(((await c.json()) as any).owner).toBe("lapuser");
+  });
+
+  it("claims an org scope when the token holder is an active admin", async () => {
+    mockGithubUser("some-admin", 42); // login != scope → org membership is checked
+    mockGithubMembership("lapcorp", {
+      role: "admin",
+      state: "active",
+      organization: { login: "lapcorp", id: 8002 },
+    });
+    const c = await claimGithub("lapcorp", "gho_devicetoken");
+    expect(c.status).toBe(201);
+    expect(((await c.json()) as any).owner).toBe("lapcorp");
+  });
+
+  it("refuses an org scope for a non-admin (or non-member)", async () => {
+    mockGithubUser("some-member", 43);
+    mockGithubMembership("membercorp", {
+      role: "member",
+      state: "active",
+      organization: { login: "membercorp", id: 8003 },
+    });
+    expect((await claimGithub("membercorp", "gho_devicetoken")).status).toBe(403);
+
+    mockGithubUser("stranger", 44);
+    mockGithubMembership("notmine", {}, 404); // not a member at all
+    expect((await claimGithub("notmine", "gho_devicetoken")).status).toBe(403);
+  });
+
+  it("treats the OIDC and OAuth paths as one identity (interchangeable, same GitHub id)", async () => {
+    // Claim via CI OIDC, binding owner_id 5005…
+    const oidc = await signJwt(privateKey, claims("crossorg", "5005"));
+    expect((await claim("crossorg", oidc)).status).toBe(201);
+    // …then re-claim from a laptop: an admin of `crossorg` whose org id is the SAME 5005 → rotation.
+    mockGithubUser("cross-admin", 1);
+    mockGithubMembership("crossorg", {
+      role: "admin",
+      state: "active",
+      organization: { login: "crossorg", id: 5005 },
+    });
+    expect((await claimGithub("crossorg", "gho_devicetoken", TOKEN + "rot")).status).toBe(200);
+    // A different GitHub org id (a name collision on another account) cannot take it over.
+    mockGithubUser("other-admin", 2);
+    mockGithubMembership("crossorg", {
+      role: "admin",
+      state: "active",
+      organization: { login: "crossorg", id: 9999 },
+    });
+    expect((await claimGithub("crossorg", "gho_devicetoken")).status).toBe(409);
+  });
+
+  it("requires exactly one proof", async () => {
+    const neither = await SELF.fetch("https://registry.test/v1/scopes/claim", {
+      method: "POST",
+      body: JSON.stringify({ scope: "noproof", token: TOKEN }),
+    });
+    expect(neither.status).toBe(400);
+    const both = await SELF.fetch("https://registry.test/v1/scopes/claim", {
+      method: "POST",
+      body: JSON.stringify({ scope: "bothproof", token: TOKEN, oidc: "x", github_token: "y" }),
+    });
+    expect(both.status).toBe(400);
   });
 });

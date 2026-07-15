@@ -20,6 +20,7 @@ export default defineWorkersConfig(async () => {
               OIDC_ISSUER: "https://oidc.test",
               OIDC_AUDIENCE: "noeta-registry",
               OIDC_JWKS_URL: "https://oidc.test/jwks",
+              GITHUB_API_URL: "https://gh-api.test",
             },
           },
         },
