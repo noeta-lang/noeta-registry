@@ -48,6 +48,7 @@ Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "s
 409 Conflict                        this version exists with different coordinates (immutable)
 401 Unauthorized / 403 Forbidden    missing/invalid token, or token does not own {company}
 403 Forbidden                       {company} is a reserved built-in namespace (std/noeta/core)
+403 Forbidden                       {company} requires provenance but this release carries none
 400 Bad Request                     malformed body / identity / both provenance roots / bad signature
 ```
 
@@ -147,6 +148,28 @@ transferred org can't silently take a scope over — and an admin-bootstrapped s
 transferred to a claimant. Built-in namespaces (`std`/`noeta`/`core`) are never claimable. Configure
 via `OIDC_ISSUER` / `OIDC_JWKS_URL` (default: GitHub Actions) and `OIDC_AUDIENCE` (the audience your
 publishing workflow requests its token for).
+
+## `POST /v1/scopes/{scope}/policy` — set a scope's publishing policy
+
+Set the scope's **require-provenance** policy. Requires `Authorization: Bearer <token>` owning
+`{scope}` (same auth as publish — the scope's owner sets its own policy).
+
+```
+Body: { "require_provenance": true, "root": "keyless" }   // root optional: "key" | "keyless"
+
+200 OK   { "status": "policy updated", "scope": "para", "require_provenance": true, "root": "keyless" }
+401 / 403   missing/invalid token, or token does not own {scope}
+400 Bad Request   malformed body / bad root
+```
+
+When `require_provenance` is on, `POST /v1/packages/{scope}/…` **refuses a release that lacks the
+required provenance** (403) — so a leaked publish token alone can no longer push a release: the
+attacker also needs the signing key (`key` root, whose Ed25519 signature the registry verifies) or the
+OIDC identity behind a keyless bundle (`keyless` root). `root` narrows which is required; omitted, a
+key signature *or* a keyless bundle satisfies it. Default is off (unsigned allowed) so the existing
+ecosystem keeps working — this is opt-in, per scope, and the recommended setting for any scope whose
+releases are signed. Consumers can additionally demand provenance for a dependency independently of
+the scope's own policy via `[trust].require_provenance` in their `noeta.toml`.
 
 ## `POST /v1/scopes` *(admin, bootstrap)*
 

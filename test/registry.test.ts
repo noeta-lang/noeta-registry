@@ -252,4 +252,64 @@ describe("noeta registry", () => {
     );
     expect(pub.status).toBe(201);
   });
+
+  // namespace-protection #1, Phase 1 — require-provenance: a scope owner can demand every release be
+  // signed, so a leaked token alone (without the key / OIDC identity) can no longer publish.
+  it("require-provenance (any root) rejects an unsigned publish and accepts a bundle", async () => {
+    await post("/scopes", { scope: "rp", token: TOKEN + "rp" }, ADMIN);
+    // Only the owner may set the policy.
+    expect((await post("/scopes/rp/policy", { require_provenance: true })).status).toBe(401);
+    expect((await post("/scopes/rp/policy", { require_provenance: true }, "wrong")).status).toBe(403);
+    const set = await post("/scopes/rp/policy", { require_provenance: true }, TOKEN + "rp");
+    expect(set.status).toBe(200);
+
+    // Unsigned is now refused; a keyless bundle satisfies "any root".
+    const unsigned = await post(
+      "/packages/rp/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+      TOKEN + "rp",
+    );
+    expect(unsigned.status).toBe(403);
+    expect(((await unsigned.json()) as any).error).toContain("requires");
+
+    const bundle = JSON.stringify({ dsseEnvelope: { payload: "e30=" } });
+    const signed = await post(
+      "/packages/rp/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", bundle },
+      TOKEN + "rp",
+    );
+    expect(signed.status).toBe(201);
+  });
+
+  it("require-provenance root=key rejects a keyless release and accepts a valid signature", async () => {
+    // A scope pinned to the key root: only a release with a valid Ed25519 signature is accepted — a
+    // keyless bundle (a different, weaker-for-this-scope root) is refused.
+    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const pubRaw = new Uint8Array(
+      (await crypto.subtle.exportKey("raw", (kp as CryptoKeyPair).publicKey)) as ArrayBuffer,
+    );
+    const publicHex = [...pubRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await post("/scopes", { scope: "rpk", token: TOKEN + "rpk", public_key: publicHex }, ADMIN);
+    expect((await post("/scopes/rpk/policy", { require_provenance: true, root: "key" }, TOKEN + "rpk")).status).toBe(200);
+
+    // A keyless bundle does not satisfy a key-root requirement.
+    const bundle = JSON.stringify({ dsseEnvelope: { payload: "e30=" } });
+    const keyless = await post(
+      "/packages/rpk/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", bundle },
+      TOKEN + "rpk",
+    );
+    expect(keyless.status).toBe(403);
+
+    // A valid signature over the canonical attestation does.
+    const msg = new TextEncoder().encode("noeta-attestation-v1\nrpk/a\n1.0.0\nabc\n");
+    const sigRaw = new Uint8Array(await crypto.subtle.sign("Ed25519", (kp as CryptoKeyPair).privateKey, msg));
+    const signature = [...sigRaw].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const ok = await post(
+      "/packages/rpk/a",
+      { version: "1.0.0", url: "u", tag: "t", sha: "abc", signature },
+      TOKEN + "rpk",
+    );
+    expect(ok.status).toBe(201);
+  });
 });

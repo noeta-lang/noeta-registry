@@ -87,6 +87,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (parts.length === 3 && parts[1] === "scopes" && parts[2] === "claim" && request.method === "POST") {
     return claimScope(request, env);
   }
+  // POST /v1/scopes/{scope}/policy  — set the scope's publishing policy (owner-authenticated)
+  if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "policy" && request.method === "POST") {
+    return setScopePolicy(request, env, parts[2]);
+  }
   // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
   if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
     return getScopeKey(env, parts[2]);
@@ -284,6 +288,24 @@ async function publish(request: Request, env: Env, company: string, name: string
     bundle = rawBundle;
   }
 
+  // Enforce the scope's provenance policy (require-provenance, namespace-protection #1). When on, a
+  // release must carry the required trust root, so a leaked token alone — without the signing key
+  // (`key`) or the OIDC identity behind a bundle (`keyless`) — can't publish. `sig` is already
+  // verified above against the scope's public key, so its presence here means a *valid* signature.
+  const policy = await env.DB.prepare(
+    "SELECT require_provenance, provenance_root FROM scopes WHERE scope = ?",
+  )
+    .bind(company)
+    .first<{ require_provenance: number; provenance_root: string | null }>();
+  if (policy && policy.require_provenance) {
+    const root = policy.provenance_root; // "key" | "keyless" | null (either)
+    const satisfied = root === "key" ? sig !== null : root === "keyless" ? bundle !== null : (sig !== null || bundle !== null);
+    if (!satisfied) {
+      const need = root ? `\`${root}\` provenance` : "signed provenance (a key signature or a keyless bundle)";
+      return json({ error: `scope \`${company}\` requires ${need}; this release carries none` }, 403);
+    }
+  }
+
   const existing = await env.DB.prepare(
     "SELECT url, tag, sha, deps FROM packages WHERE name = ? AND version = ?",
   )
@@ -449,6 +471,40 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
     .bind(scope, await sha256hex(token), ownerId, new Date().toISOString())
     .run();
   return json({ status: "scope claimed", scope, owner: claims.repository_owner }, 201);
+}
+
+/** POST /v1/scopes/{scope}/policy — set a scope's publishing policy (namespace-protection #1,
+ *  require-provenance). Owner-authenticated with the scope's publish token (same auth as publish).
+ *  Body `{ require_provenance: boolean, root?: "key" | "keyless" }`: when on, publishing a release
+ *  that lacks the required provenance is refused, so a leaked token alone can't push. `root` narrows
+ *  which trust root is required; omitted = either a key signature or a keyless bundle satisfies it. */
+async function setScopePolicy(request: Request, env: Env, scope: string): Promise<Response> {
+  if (!IDENT.test(scope)) return json({ error: "scope must be an identifier" }, 400);
+  const auth = await authorizeScope(request, env, scope);
+  if (auth instanceof Response) return auth;
+
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const { require_provenance, root } = body as Record<string, unknown>;
+  if (typeof require_provenance !== "boolean") {
+    return json({ error: "body must be { require_provenance: boolean, root?: \"key\"|\"keyless\" }" }, 400);
+  }
+  let provenanceRoot: string | null = null;
+  if (require_provenance && root !== undefined) {
+    if (root !== "key" && root !== "keyless") {
+      return json({ error: "`root` must be \"key\" or \"keyless\"" }, 400);
+    }
+    provenanceRoot = root;
+  }
+  await env.DB.prepare("UPDATE scopes SET require_provenance = ?, provenance_root = ? WHERE scope = ?")
+    .bind(require_provenance ? 1 : 0, provenanceRoot, scope)
+    .run();
+  return json({
+    status: "policy updated",
+    scope,
+    require_provenance,
+    root: provenanceRoot ?? undefined,
+  });
 }
 
 /** Authorize a publish/yank: the bearer token must own `company`'s scope. */
