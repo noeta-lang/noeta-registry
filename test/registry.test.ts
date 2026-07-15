@@ -42,6 +42,10 @@ describe("noeta registry", () => {
     expect(body.name).toBe("acme/imgfx");
     expect(body.versions).toHaveLength(1);
     expect(body.versions[0]).toMatchObject({ version: "1.2.0", sha: "e3b0c44", yanked: false });
+    // The publish timestamp is served (as ISO + epoch-millis) for the client's publish-cooldown window.
+    expect(typeof body.versions[0].published_at).toBe("string");
+    expect(typeof body.versions[0].published_at_unix).toBe("number");
+    expect(body.versions[0].published_at_unix).toBeGreaterThan(0);
   });
 
   it("stores and serves per-version dependency metadata", async () => {

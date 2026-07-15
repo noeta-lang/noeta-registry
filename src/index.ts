@@ -49,6 +49,7 @@ interface VersionRow {
   sig: string | null; // hex Ed25519 signature over the attestation, or null (unsigned)
   bundle: string | null; // JSON Sigstore keyless bundle, or null
   yanked: number;
+  published_at: string; // ISO-8601 UTC publish time (for the client's publish-cooldown window)
 }
 
 interface Dep {
@@ -166,20 +167,29 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, bundle, yanked FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
-  const versions = (results ?? []).map((r) => ({
-    version: r.version,
-    url: r.url,
-    tag: r.tag,
-    sha: r.sha,
-    deps: parseDeps(r.deps),
-    signature: r.sig ?? undefined,
-    bundle: r.bundle ?? undefined,
-    yanked: r.yanked !== 0,
-  }));
+  const versions = (results ?? []).map((r) => {
+    // `published_at` (publish-cooldown, namespace-protection #1): echo the stored ISO timestamp and a
+    // parsed epoch-millis so the client can apply a cooldown window without an ISO-8601 date parser.
+    // A NaN parse (shouldn't happen — the column is NOT NULL ISO) is dropped, treating the release as
+    // undateable (never in cooldown) rather than failing the whole listing.
+    const ms = Date.parse(r.published_at);
+    return {
+      version: r.version,
+      url: r.url,
+      tag: r.tag,
+      sha: r.sha,
+      deps: parseDeps(r.deps),
+      signature: r.sig ?? undefined,
+      bundle: r.bundle ?? undefined,
+      yanked: r.yanked !== 0,
+      published_at: r.published_at,
+      published_at_unix: Number.isNaN(ms) ? undefined : ms,
+    };
+  });
   return json({ name, versions });
 }
 
