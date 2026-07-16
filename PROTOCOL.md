@@ -41,6 +41,7 @@ Publish a release. Requires `Authorization: Bearer <token>`; the token must own 
 ```
 Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "sha": "e3b0c4…",
         "deps": [ { "package": "acme/bytes", "req": "^1.0" } ],   // deps optional, default []
+        "license": "MIT OR Apache-2.0",                           // optional SPDX expression
         "signature": "<128-hex>" | "bundle": "<json>" }           // provenance — at most one, optional
 
 201 Created                         published
@@ -73,9 +74,15 @@ of two trust roots — never both (a second root is a downgrade surface):
 
 Both provenance fields are echoed back on `GET` (`signature` / `bundle`, absent when unset).
 
+**License (optional).** The release's declared license as an SPDX expression (≤ 120 chars,
+shape-checked only). Part of the **immutable release record** — echoed on `GET` and bound into the
+release's transparency-log leaf — so what the index said at resolve time is tamper-evident. It is
+**publisher-asserted**: the registry never fetches source and cannot verify the claim matches the
+repository's LICENSE file; the SHA pin means a consumer can always check the release's actual tree.
+
 A published `(name, version)` is **immutable**: it can be *yanked* but never overwritten with
-different coordinates. The `sha` is recorded at publish time so the index — not just a consumer's
-lockfile — is authoritative on "this version = this commit".
+different coordinates, deps, or license. The `sha` is recorded at publish time so the index — not
+just a consumer's lockfile — is authoritative on "this version = this commit".
 
 ## `POST /v1/packages/{company}/{package}/{version}/yank` — body `{ "yanked": true|false }`
 
@@ -251,9 +258,14 @@ against it.
 ```
 
 The client recomputes the leaf hash from `record` — the canonical
-`noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n` — and verifies the
-audit `proof` reconstructs `root_hash`, which must match a signed checkpoint. `provenance` is
-`key:{sig}`, `keyless:{sha256(bundle)}`, or `unsigned`.
+`noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n` — and
+verifies the audit `proof` reconstructs `root_hash`, which must match a signed checkpoint.
+`provenance` is `key:{sig}`, `keyless:{sha256(bundle)}`, or `unsigned`; `license` is the release's
+declared SPDX expression, or empty when none.
+
+**Record evolution.** New fields are only ever **appended**, and clients parse length-tolerantly
+(match on the fields you know, ignore extras, treat missing trailing fields as pre-dating them) —
+`license` was appended after the original six, so leaves written before it still verify unchanged.
 
 ### `GET /v1/log/consistency?from={m}&to={n}` — consistency proof
 

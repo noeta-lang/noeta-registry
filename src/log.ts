@@ -27,7 +27,12 @@ export async function provenanceTag(sig: string | null, bundle: string | null): 
 }
 
 /** The canonical log record for a release — the exact bytes the leaf hashes, reproduced identically by
- *  the client so it can recompute the leaf and verify inclusion. */
+ *  the client so it can recompute the leaf and verify inclusion.
+ *
+ *  `license` (the release's declared SPDX expression, or "" when none) is a trailing field appended
+ *  after the original six — the client parses length-tolerantly (`>= 6` fields), so records written
+ *  before the field existed still verify, and a record's license is absent-vs-empty distinguishable
+ *  by field count. New fields must likewise only ever be appended. */
 export function logRecord(
   name: string,
   version: string,
@@ -35,8 +40,9 @@ export function logRecord(
   tag: string,
   sha: string,
   provenance: string,
+  license: string,
 ): string {
-  return `${RECORD_PREFIX}\n${name}\n${version}\n${url}\n${tag}\n${sha}\n${provenance}\n`;
+  return `${RECORD_PREFIX}\n${name}\n${version}\n${url}\n${tag}\n${sha}\n${provenance}\n${license}\n`;
 }
 
 /** The next append index and the leaf hash for `record` — computed by the publish path so the release

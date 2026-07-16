@@ -54,6 +54,7 @@ interface VersionRow {
   bundle: string | null; // JSON Sigstore keyless bundle, or null
   yanked: number;
   published_at: string; // ISO-8601 UTC publish time (for the client's publish-cooldown window)
+  license: string | null; // declared SPDX expression, or null (immutable with the release)
 }
 
 interface Dep {
@@ -181,7 +182,7 @@ async function route(request: Request, env: Env): Promise<Response> {
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at, license FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
@@ -202,6 +203,7 @@ async function getVersions(env: Env, name: string): Promise<Response> {
       yanked: r.yanked !== 0,
       published_at: r.published_at,
       published_at_unix: Number.isNaN(ms) ? undefined : ms,
+      license: r.license ?? undefined,
     };
   });
   return json({ name, versions });
@@ -355,6 +357,25 @@ async function publish(request: Request, env: Env, company: string, name: string
   if (deps instanceof Response) return deps;
   const depsJson = JSON.stringify(deps);
 
+  // Optional declared license — an SPDX expression like "MIT OR Apache-2.0". Part of the immutable
+  // release record (and bound into the log leaf below), unlike advisory docs/READMEs: consumers and
+  // audit tooling must be able to trust what the index said at resolve time. Shape-checked only
+  // (SPDX charset, bounded) — the registry never fetches source, so the *claim* is the publisher's;
+  // the SHA pin lets a consumer check the actual LICENSE file.
+  const rawLicense = (body as Record<string, unknown>).license;
+  let license: string | null = null;
+  if (rawLicense !== undefined && rawLicense !== null) {
+    if (
+      typeof rawLicense !== "string" ||
+      rawLicense.trim().length === 0 ||
+      rawLicense.length > 120 ||
+      !/^[0-9A-Za-z .+()-]+$/.test(rawLicense)
+    ) {
+      return json({ error: "`license` must be an SPDX license expression (≤ 120 chars)" }, 400);
+    }
+    license = rawLicense.trim();
+  }
+
   // Provenance (Phase 4 #2): if a signature is present, verify it against the scope's registered
   // public key over the canonical attestation — reject a bad or unverifiable signature so the index
   // never serves a signature that doesn't actually attest this release. Absent → unsigned (allowed
@@ -424,13 +445,16 @@ async function publish(request: Request, env: Env, company: string, name: string
   }
 
   const existing = await env.DB.prepare(
-    "SELECT url, tag, sha, deps FROM packages WHERE name = ? AND version = ?",
+    "SELECT url, tag, sha, deps, license FROM packages WHERE name = ? AND version = ?",
   )
     .bind(name, version)
-    .first<{ url: string; tag: string; sha: string; deps: string }>();
+    .first<{ url: string; tag: string; sha: string; deps: string; license: string | null }>();
   if (existing) {
-    // Idempotent re-publish of identical coordinates + deps; otherwise the version is immutable.
-    if (existing.url === url && existing.tag === tag && existing.sha === sha && existing.deps === depsJson) {
+    // Idempotent re-publish of identical coordinates + deps + license; otherwise immutable.
+    if (
+      existing.url === url && existing.tag === tag && existing.sha === sha &&
+      existing.deps === depsJson && existing.license === license
+    ) {
       return json({ status: "already published", name, version }, 200);
     }
     return json(
@@ -442,15 +466,15 @@ async function publish(request: Request, env: Env, company: string, name: string
   // Append the release to the transparency log in the same batch as the package row, so the two are
   // written atomically — a published release is always logged (namespace-protection #1).
   const now = new Date().toISOString();
-  const record = log.logRecord(name, version, url, tag, sha, await log.provenanceTag(sig, bundle));
+  const record = log.logRecord(name, version, url, tag, sha, await log.provenanceTag(sig, bundle), license ?? "");
   const { idx, leaf } = await log.prepareEntry(env, record);
   await env.DB.batch([
     env.DB
       .prepare(
-        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at, license) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
       )
-      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now),
+      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now, license),
     env.DB
       .prepare(
         "INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -463,6 +487,7 @@ async function publish(request: Request, env: Env, company: string, name: string
       name,
       version,
       sha,
+      license: license ?? undefined,
       provenance: sig ? "key" : bundle ? "keyless" : "unsigned",
       log_index: idx,
     },
