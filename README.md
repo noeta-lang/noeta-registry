@@ -43,9 +43,9 @@ strict `Content-Security-Policy` (`default-src 'none'`) is layered on top.
 ## Local development
 
 ```sh
-npm install
-npm run migrate:local          # apply migrations to the local D1
-npm run dev                    # wrangler dev — a local Worker + local D1
+pnpm install
+pnpm run migrate:local          # apply migrations to the local D1
+pnpm run dev                    # wrangler dev — a local Worker + local D1
 ```
 
 Then, against `http://localhost:8787`:
@@ -65,9 +65,9 @@ curl localhost:8787/v1/packages/acme/imgfx
 
 ```sh
 wrangler d1 create noeta-registry           # paste the printed id into wrangler.jsonc
-npm run migrate:remote
+pnpm run migrate:remote
 wrangler secret put ADMIN_TOKEN             # set the admin token
-npm run deploy
+pnpm run deploy
 ```
 
 Generated with assistance from Claude Code; not yet deployed.

@@ -4,6 +4,7 @@
   "private": true,
   "description": "The Noeta package registry — an index (name+version → git coordinates) on Cloudflare Workers + D1.",
   "type": "module",
+  "packageManager": "pnpm@11.13.1",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
