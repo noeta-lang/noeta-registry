@@ -65,22 +65,24 @@ async function routeWeb(env: Env, parts: string[]): Promise<Page> {
 
 async function homePage(env: Env): Promise<string> {
   const { results } = await env.DB.prepare(
-    "SELECT name, version, published_at FROM packages ORDER BY published_at DESC LIMIT 200",
-  ).all<{ name: string; version: string; published_at: string }>();
-  // Most-recent publish per package, in publish order.
+    "SELECT name, version, published_at, license FROM packages ORDER BY published_at DESC LIMIT 200",
+  ).all<{ name: string; version: string; published_at: string; license: string | null }>();
+  // Most-recent publish per package, in publish order — its license rides along.
   const seen = new Set<string>();
-  const recent: { name: string; version: string }[] = [];
+  const recent: { name: string; version: string; license: string | null }[] = [];
   for (const r of results ?? []) {
     if (seen.has(r.name)) continue;
     seen.add(r.name);
-    recent.push({ name: r.name, version: r.version });
+    recent.push({ name: r.name, version: r.version, license: r.license });
     if (recent.length >= 40) break;
   }
   const list = recent.length
     ? `<ul class="pkglist">${recent
         .map(
           (r) =>
-            `<li><a href="/${esc(r.name)}">${esc(r.name)}</a> <span class="muted">${esc(r.version)}</span></li>`,
+            `<li><a href="/${esc(r.name)}">${esc(r.name)}</a> <span class="muted">${esc(r.version)}</span>${
+              r.license ? ` <span class="badge license">${esc(r.license)}</span>` : ""
+            }</li>`,
         )
         .join("")}</ul>`
     : `<p class="muted">No packages published yet.</p>`;

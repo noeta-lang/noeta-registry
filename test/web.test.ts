@@ -98,6 +98,8 @@ describe("registry web UI", () => {
     const body = await r.text();
     expect(body).toContain("Noeta registry");
     expect(body).toContain("/acme/greeter");
+    // The latest release's license shows in the listing (greeter 1.1.0 declared one).
+    expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
   });
 
   it("shows a package page with the latest version, source, and version list", async () => {
