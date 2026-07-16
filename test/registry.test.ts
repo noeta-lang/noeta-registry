@@ -185,6 +185,52 @@ describe("noeta registry", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("records a declared license: immutable, served on the listing, bound into the log leaf", async () => {
+    const pub = await post(
+      "/packages/acme/lic",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", license: "MIT OR Apache-2.0" },
+      TOKEN,
+    );
+    expect(pub.status).toBe(201);
+    expect(((await pub.json()) as any).license).toBe("MIT OR Apache-2.0");
+    // Served on the versions listing.
+    const body = (await (await get("/packages/acme/lic")).json()) as any;
+    expect(body.versions[0].license).toBe("MIT OR Apache-2.0");
+    // Bound into the transparency-log record as the trailing field (after provenance).
+    const proof = (await (await get("/log/proof/acme/lic/1.0.0")).json()) as any;
+    const fields = proof.record.split("\n");
+    expect(fields[7]).toBe("MIT OR Apache-2.0");
+    // Immutable with the release: same coords with a different license is a 409, identical
+    // re-publish (license included) stays idempotent.
+    const relicensed = await post(
+      "/packages/acme/lic",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", license: "GPL-3.0-only" },
+      TOKEN,
+    );
+    expect(relicensed.status).toBe(409);
+    const same = await post(
+      "/packages/acme/lic",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", license: "MIT OR Apache-2.0" },
+      TOKEN,
+    );
+    expect(same.status).toBe(200);
+  });
+
+  it("rejects a malformed license, and a license-less release logs an empty license field", async () => {
+    const bad = await post(
+      "/packages/acme/badlic",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", license: "<script>" },
+      TOKEN,
+    );
+    expect(bad.status).toBe(400);
+    const none = await post("/packages/acme/nolic", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    expect(none.status).toBe(201);
+    const body = (await (await get("/packages/acme/nolic")).json()) as any;
+    expect(body.versions[0].license).toBeUndefined();
+    const proof = (await (await get("/log/proof/acme/nolic/1.0.0")).json()) as any;
+    expect(proof.record.split("\n")[7]).toBe("");
+  });
+
   it("stores and serves a release's README verbatim (last-wins)", async () => {
     await post("/packages/acme/readmed", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
     // No README yet.

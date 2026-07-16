@@ -83,7 +83,7 @@ const README =
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
   await post("/packages/acme/greeter", { version: "1.0.0", url: "https://github.com/acme/greeter", tag: "v1.0.0", sha: "aaa" }, TOKEN);
-  await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: "bbb" }, TOKEN);
+  await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: "bbb", license: "MIT OR Apache-2.0" }, TOKEN);
   expect((await putText("/packages/acme/greeter/docs/1.1.0", DOCS, TOKEN)).status).toBe(200);
   expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
@@ -109,6 +109,11 @@ describe("registry web UI", () => {
     expect(body).toContain("bbb"); // pinned commit of the latest
     // A docs link, because 1.1.0 has docs.
     expect(body).toContain("/acme/greeter/1.1.0/docs");
+    // The declared license, as a badge on the selected version.
+    expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
+    // 1.0.0 declared none — its page shows no license badge.
+    const old = await (await web("/acme/greeter/1.0.0")).text();
+    expect(old).not.toContain(`badge license`);
   });
 
   it("renders the version's README on the package page, escaped", async () => {

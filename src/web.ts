@@ -26,6 +26,7 @@ interface Row {
   bundle: string | null;
   yanked: number;
   published_at: string;
+  license: string | null;
 }
 
 /** A rendered page and its HTTP status. */
@@ -142,7 +143,7 @@ async function packagePage(env: Env, name: string, version?: string): Promise<Pa
     `${name} — Noeta registry`,
     `<nav class="crumb"><a href="/">registry</a> / <span>${esc(name)}</span></nav>
      <h1>${esc(name)} <span class="version">${esc(selected.version)}</span></h1>
-     <p>${provenanceBadge(selected)}${selected.yanked ? `<span class="badge yanked">yanked</span>` : ""}</p>
+     <p>${provenanceBadge(selected)}${licenseBadge(selected)}${selected.yanked ? `<span class="badge yanked">yanked</span>` : ""}</p>
      <p class="actions">${docsLink}</p>
      ${readmeHtml}
 
@@ -251,7 +252,7 @@ function notFoundPage(message = "That page does not exist."): string {
 
 async function packageRows(env: Env, name: string): Promise<Row[]> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at FROM packages WHERE name = ?",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at, license FROM packages WHERE name = ?",
   )
     .bind(name)
     .all<Row>();
@@ -340,6 +341,12 @@ function provenanceBadge(r: Row): string {
   if (r.sig) return `<span class="badge signed">signed · key</span>`;
   if (r.bundle) return `<span class="badge signed">signed · keyless</span>`;
   return `<span class="badge unsigned">unsigned</span>`;
+}
+
+/** The release's declared SPDX license (publisher-asserted — the SHA-pinned source is the ground
+ *  truth), or nothing when the release declared none. */
+function licenseBadge(r: Row): string {
+  return r.license ? `<span class="badge license">${esc(r.license)}</span>` : "";
 }
 
 /** A git URL becomes a link only for http(s); anything else renders as escaped text. */
@@ -498,7 +505,7 @@ h1{font-size:1.7rem;margin:.2rem 0 .6rem}h2{font-size:1.2rem;margin:2rem 0 .6rem
 .crumb{color:var(--muted);font-size:.9rem;margin-bottom:1rem}
 .muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
 .badge{display:inline-block;font-size:.75rem;padding:.1rem .5rem;border-radius:999px;background:var(--badge);margin-right:.35rem;vertical-align:middle}
-.badge.signed{color:var(--ok)}.badge.unsigned{color:var(--muted)}.badge.yanked{color:var(--warn)}
+.badge.signed{color:var(--ok)}.badge.unsigned{color:var(--muted)}.badge.yanked{color:var(--warn)}.badge.license{color:var(--fg)}
 .button{display:inline-block;padding:.4rem .8rem;border:1px solid var(--border);border-radius:6px}
 .actions{margin:1rem 0}
 ul.pkglist{list-style:none;padding:0}ul.pkglist li{padding:.35rem 0;border-bottom:1px solid var(--border)}
