@@ -119,6 +119,11 @@ async function packagePage(env: Env, name: string, version?: string): Promise<Pa
     ? `<a class="button" href="/${esc(name)}/${esc(selected.version)}/docs">Documentation →</a>`
     : `<span class="muted">No documentation published.</span>`;
 
+  // The publisher-uploaded README (npm/crates.io model), rendered through the same escape-first
+  // markdown renderer as doc prose — publisher markdown is untrusted input.
+  const readme = await readmeMd(env, name, selected.version);
+  const readmeHtml = readme ? `<h2>README</h2><div class="prose readme">${md(readme)}</div>` : "";
+
   const versionRows = rows
     .map((r) => {
       const here = r.version === selected.version;
@@ -139,6 +144,7 @@ async function packagePage(env: Env, name: string, version?: string): Promise<Pa
      <h1>${esc(name)} <span class="version">${esc(selected.version)}</span></h1>
      <p>${provenanceBadge(selected)}${selected.yanked ? `<span class="badge yanked">yanked</span>` : ""}</p>
      <p class="actions">${docsLink}</p>
+     ${readmeHtml}
 
      <h2>Source</h2>
      <table class="kv">
@@ -267,6 +273,13 @@ async function docsJson(env: Env, name: string, version: string): Promise<string
     .bind(name, version)
     .first<{ docs_json: string }>();
   return row ? row.docs_json : null;
+}
+
+async function readmeMd(env: Env, name: string, version: string): Promise<string | null> {
+  const row = await env.DB.prepare("SELECT readme_md FROM readmes WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first<{ readme_md: string }>();
+  return row ? row.readme_md : null;
 }
 
 /** Compare two SemVer strings (major.minor.patch, prerelease sorts before its release). Enough for
