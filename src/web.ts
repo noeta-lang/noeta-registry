@@ -88,7 +88,8 @@ async function homePage(env: Env): Promise<string> {
     : `<p class="muted">No packages published yet.</p>`;
   return layout(
     "Noeta registry",
-    `<h1>Noeta registry</h1>
+    `<p class="eyebrow">Package registry</p>
+     <h1>The Noeta registry</h1>
      <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. An index, not a code
      store: each release maps to the git coordinates its source lives at, with pinned commit and
      optional provenance. Browse published packages and their documentation below.</p>
@@ -480,61 +481,158 @@ function html(body: string, status = 200): Response {
     status,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      // A page renders only its own inline styles and no scripts — a strict CSP is cheap defense in
-      // depth over the escape-first renderer.
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https:",
+      // The page renders only its own inline styles and no scripts — a strict CSP is cheap defense
+      // in depth over the escape-first renderer. The two Google Fonts hosts are the only concession,
+      // so the registry can wear the shared "Ink & Signal" typography without bundling font binaries.
+      "content-security-policy":
+        "default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; " +
+        "font-src https://fonts.gstatic.com; img-src https:",
     },
   });
 }
 
+/**
+ * The shared page shell. The registry has no build step (it is a dependency-free Worker), so rather
+ * than importing `@noeta/theme` the way the Astro sites do, its tokens + chrome are inlined here —
+ * the same "Ink & Signal" design language as noeta.dev, docs, and the playground: a warm near-black
+ * editorial dark theme, one amber `--signal` accent, the atmospheric `.field` backdrop, and the
+ * Instrument Serif / Hanken Grotesk / Spline Sans Mono type trio pulled from Google Fonts.
+ */
 function layout(title: string, body: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#131110">
 <title>${esc(title)}</title>
 <style>
-:root{--bg:#fff;--fg:#1f2328;--muted:#656d76;--border:#d0d7de;--link:#0969da;--code:#f6f8fa;--badge:#eaeef2;--ok:#1a7f37;--warn:#cf222e}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--border:#30363d;--link:#58a6ff;--code:#161b22;--badge:#21262d;--ok:#3fb950;--warn:#f85149}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-.container{max-width:860px;margin:0 auto;padding:2rem 1.25rem 5rem}
-a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
-h1{font-size:1.7rem;margin:.2rem 0 .6rem}h2{font-size:1.2rem;margin:2rem 0 .6rem;border-bottom:1px solid var(--border);padding-bottom:.3rem}h3{font-size:1.05rem;margin:1.4rem 0 .4rem}
-.lead{color:var(--muted);max-width:60ch}
-.version{color:var(--muted);font-weight:400;font-size:1.1rem}
-.crumb{color:var(--muted);font-size:.9rem;margin-bottom:1rem}
-.muted{color:var(--muted)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9em}
-.badge{display:inline-block;font-size:.75rem;padding:.1rem .5rem;border-radius:999px;background:var(--badge);margin-right:.35rem;vertical-align:middle}
-.badge.signed{color:var(--ok)}.badge.unsigned{color:var(--muted)}.badge.yanked{color:var(--warn)}.badge.license{color:var(--fg)}
-.button{display:inline-block;padding:.4rem .8rem;border:1px solid var(--border);border-radius:6px}
-.actions{margin:1rem 0}
-ul.pkglist{list-style:none;padding:0}ul.pkglist li{padding:.35rem 0;border-bottom:1px solid var(--border)}
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@300..700&family=Spline+Sans+Mono:ital,wght@0,300..600;1,400&display=swap');
+:root{
+--ink-0:#131110;--ink-1:#191715;--ink-2:#211e1b;--ink-3:#2b2723;
+--paper-0:#ece7da;--paper-1:#b9b2a1;--paper-2:#837d6f;
+--signal:#e69f37;--signal-bright:#ffc46b;--signal-dim:rgba(230,159,55,.14);
+--syn-string:#a9c181;--syn-number:#e6836a;
+--line:rgba(236,231,218,.1);--line-strong:rgba(236,231,218,.18);
+--font-display:"Instrument Serif","Georgia",serif;
+--font-body:"Hanken Grotesk","Segoe UI",system-ui,sans-serif;
+--font-mono:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+--max:60rem;--radius:10px;color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ink-0);color:var(--paper-0);font-family:var(--font-body);font-size:1.0313rem;line-height:1.65;font-weight:380;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+a{color:inherit;text-decoration:none}
+::selection{background:rgba(230,159,55,.28);color:var(--paper-0)}
+/* atmosphere */
+.field{position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(90rem 44rem at 78% -18%,rgba(230,159,55,.09),transparent 62%),radial-gradient(70rem 40rem at -12% 112%,rgba(127,187,179,.05),transparent 60%),var(--ink-0)}
+.field::before{content:"";position:absolute;inset:0;background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);background-size:72px 72px;mask-image:radial-gradient(100rem 60rem at 70% -10%,rgba(0,0,0,.55),transparent 70%)}
+.field::after{content:"";position:absolute;inset:0;opacity:.05;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E")}
+/* header */
+.wrap{max-width:var(--max);margin-inline:auto;padding-inline:clamp(1.25rem,4vw,2.5rem)}
+.site-head{position:sticky;top:0;z-index:10;backdrop-filter:blur(14px);background:color-mix(in srgb,var(--ink-0) 72%,transparent);border-bottom:1px solid var(--line)}
+.site-head .wrap{display:flex;align-items:center;justify-content:space-between;height:3.75rem}
+.wordmark{font-family:var(--font-display);font-size:1.55rem;letter-spacing:.01em;color:var(--paper-0)}
+.wordmark .tld{color:var(--paper-2);font-style:italic}
+.site-nav{display:flex;gap:clamp(1rem,3vw,2rem);align-items:center;font-family:var(--font-mono);font-size:.875rem}
+.site-nav a{color:var(--paper-1);transition:color 160ms ease}.site-nav a:hover{color:var(--signal-bright)}
+@media (max-width:38rem){.site-head .wrap{height:auto;flex-wrap:wrap;gap:.1rem 1rem;padding-block:.65rem}}
+/* main */
+.page{max-width:var(--max);margin-inline:auto;padding:clamp(2rem,5vh,3.25rem) clamp(1.25rem,4vw,2.5rem) 5rem}
+.eyebrow{font-family:var(--font-mono);font-size:.8125rem;letter-spacing:.14em;text-transform:uppercase;color:var(--signal);font-weight:500;margin-bottom:.4rem}
+.eyebrow::before{content:"// ";color:var(--paper-2)}
+h1{font-family:var(--font-display);font-weight:400;font-size:clamp(2.3rem,5vw,3.2rem);line-height:1.04;letter-spacing:-.01em;margin:.1rem 0 .6rem}
+h2{font-family:var(--font-display);font-weight:400;font-size:clamp(1.45rem,3vw,1.9rem);line-height:1.1;margin:2.4rem 0 .7rem;padding-bottom:.35rem;border-bottom:1px solid var(--line)}
+h3{font-family:var(--font-body);font-weight:600;font-size:1.08rem;margin:1.4rem 0 .4rem}
+.lead{color:var(--paper-1);max-width:60ch;font-size:1.08rem}
+.version{font-family:var(--font-mono);color:var(--signal);font-weight:400;font-size:.95em}
+.crumb{font-family:var(--font-mono);color:var(--paper-2);font-size:.82rem;letter-spacing:.02em;margin-bottom:1.4rem}
+.crumb a{color:var(--paper-1)}.crumb a:hover{color:var(--signal-bright)}
+.muted{color:var(--paper-2)}
+.mono{font-family:var(--font-mono);font-size:.88em}
+.page a{color:var(--signal-bright)}.page a:hover{color:var(--signal);text-decoration:underline}
+/* badges */
+.badge{display:inline-block;font-family:var(--font-mono);font-size:.72rem;letter-spacing:.02em;padding:.14rem .6rem;border-radius:999px;border:1px solid var(--line-strong);background:color-mix(in srgb,var(--ink-2) 70%,transparent);color:var(--paper-1);margin-right:.35rem;vertical-align:middle}
+.badge.signed{color:var(--syn-string);border-color:color-mix(in srgb,var(--syn-string) 40%,var(--line-strong))}
+.badge.unsigned{color:var(--paper-2)}
+.badge.yanked{color:var(--syn-number);border-color:color-mix(in srgb,var(--syn-number) 45%,var(--line-strong))}
+.badge.license{color:var(--paper-0)}
+/* buttons */
+.button{display:inline-flex;align-items:center;gap:.5rem;font-family:var(--font-mono);font-size:.9rem;font-weight:500;padding:.6rem 1.2rem;border-radius:999px;border:1px solid var(--line-strong);color:var(--paper-0);transition:border-color 180ms ease,background 180ms ease,transform 180ms ease}
+.page a.button{color:var(--paper-0)}
+.button:hover{border-color:var(--signal);background:var(--signal-dim);transform:translateY(-1px);text-decoration:none}
+.actions{margin:1.4rem 0}
+/* package list */
+ul.pkglist{list-style:none;padding:0;margin:.6rem 0 0}
+ul.pkglist li{display:flex;align-items:baseline;flex-wrap:wrap;gap:.55rem;padding:.6rem .2rem;border-bottom:1px solid var(--line)}
+ul.pkglist li:hover{background:color-mix(in srgb,var(--ink-1) 55%,transparent)}
+.page ul.pkglist a{color:var(--paper-0);font-weight:500}.page ul.pkglist a:hover{color:var(--signal-bright);text-decoration:none}
+/* tables */
 table{border-collapse:collapse;width:100%}
-table.kv td:first-child{color:var(--muted);width:8rem;padding:.2rem .5rem .2rem 0;vertical-align:top}
-table.versions td{padding:.35rem .5rem;border-bottom:1px solid var(--border)}
-table.versions tr.here{background:var(--code)}
-ul.deps,.modnav ul{list-style:none;padding:0}ul.deps li{padding:.2rem 0}
-.modnav{background:var(--code);border:1px solid var(--border);border-radius:6px;padding:.6rem 1rem;margin:1rem 0}
-.modnav ul{margin:.4rem 0 0;display:flex;flex-wrap:wrap;gap:.25rem 1rem}
-ul.toc{list-style:none;padding:0;margin:.3rem 0 1.2rem;display:flex;flex-wrap:wrap;gap:.2rem .6rem}
-ul.toc li{padding:0}ul.toc a{color:var(--fg)}
-pre{background:var(--code);border:1px solid var(--border);border-radius:6px;padding:.75rem 1rem;overflow:auto}
-pre code,code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em}
-:not(pre)>code{background:var(--code);padding:.1rem .35rem;border-radius:4px}
-.decl{margin:1.2rem 0}.kind{color:var(--muted);font-weight:400;font-size:.85em}
-pre.sig{background:var(--code)}
-.prose{max-width:65ch}.prose p{margin:.5rem 0}
-.module{margin:1.5rem 0 2.5rem}
-footer{margin-top:4rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--muted);font-size:.85rem}
+table.kv td{padding:.35rem .6rem .35rem 0;vertical-align:top;border-bottom:1px solid var(--line)}
+table.kv td:first-child{font-family:var(--font-mono);color:var(--paper-2);width:8rem;font-size:.85rem}
+table.versions td{padding:.45rem .6rem;border-bottom:1px solid var(--line)}
+table.versions tr.here{background:var(--signal-dim)}
+/* deps + nav */
+ul.deps,.modnav ul{list-style:none;padding:0}
+ul.deps li{padding:.3rem 0;border-bottom:1px solid var(--line)}
+.modnav{background:color-mix(in srgb,var(--ink-1) 75%,transparent);border:1px solid var(--line);border-radius:var(--radius);padding:.8rem 1.1rem;margin:1.2rem 0}
+.modnav strong{font-family:var(--font-mono);font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:var(--signal)}
+.modnav ul{margin:.5rem 0 0;display:flex;flex-wrap:wrap;gap:.3rem 1rem}
+ul.toc{list-style:none;padding:0;margin:.4rem 0 1.3rem;display:flex;flex-wrap:wrap;gap:.35rem .55rem}
+ul.toc li{padding:0}
+.page ul.toc a{display:inline-block;padding:.1rem .55rem;border:1px solid var(--line);border-radius:999px;background:color-mix(in srgb,var(--ink-2) 55%,transparent);color:var(--paper-1);font-size:.82rem}
+.page ul.toc a:hover{border-color:var(--signal);color:var(--signal-bright);text-decoration:none}
+/* code */
+pre{background:color-mix(in srgb,var(--ink-1) 88%,transparent);border:1px solid var(--line-strong);border-radius:var(--radius);padding:.9rem 1.05rem;overflow:auto}
+pre code,code{font-family:var(--font-mono);font-size:.86em}
+:not(pre)>code{background:var(--ink-3);border:1px solid var(--line);padding:.08em .38em;border-radius:5px;color:var(--paper-0)}
+pre.sig code{color:var(--paper-0)}
+/* declarations + prose */
+.decl{margin:1.4rem 0}
+.kind{font-family:var(--font-mono);color:var(--signal);font-weight:400;font-size:.72em;letter-spacing:.06em;text-transform:uppercase}
+.prose{max-width:65ch;color:var(--paper-1)}.prose p{margin:.6rem 0}
+.prose.readme{margin-top:.6rem}
+.module{margin:1.8rem 0 2.8rem}
+/* footer */
+.site-foot{border-top:1px solid var(--line);padding-block:2.6rem 3rem}
+.site-foot .wrap{display:flex;flex-wrap:wrap;gap:1.2rem 2.4rem;align-items:baseline;justify-content:space-between}
+.site-foot .tagline{font-family:var(--font-display);font-size:1.25rem}
+.site-foot .tagline em{color:var(--signal);font-style:italic}
+.foot-nav{display:flex;flex-wrap:wrap;gap:1.4rem;font-family:var(--font-mono);font-size:.84rem}
+.foot-nav a{color:var(--paper-2);transition:color 160ms ease}.foot-nav a:hover{color:var(--signal-bright)}
+.foot-meta{width:100%;margin-top:.4rem;font-size:.84rem;color:var(--paper-2)}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.button{transition:none}}
 </style>
 </head>
 <body>
-<div class="container">
-${body}
-<footer><a href="/">Noeta registry</a> · an index, not a code store · docs are advisory metadata</footer>
+<div class="field" aria-hidden="true"></div>
+<header class="site-head">
+<div class="wrap">
+<a class="wordmark" href="/">noeta<span class="tld">.dev/registry</span></a>
+<nav class="site-nav" aria-label="Site">
+<a href="https://noeta.dev">noeta.dev</a>
+<a href="https://docs.noeta.dev">docs</a>
+<a href="https://play.noeta.dev">playground</a>
+<a href="https://github.com/noeta-lang/noeta">github</a>
+</nav>
 </div>
+</header>
+<main class="page">
+${body}
+</main>
+<footer class="site-foot">
+<div class="wrap">
+<span class="tagline">AI-native, <em>human-first.</em></span>
+<nav class="foot-nav" aria-label="Footer">
+<a href="https://noeta.dev">noeta.dev</a>
+<a href="https://docs.noeta.dev">docs</a>
+<a href="https://play.noeta.dev">playground</a>
+<a href="https://github.com/noeta-lang/noeta">github</a>
+</nav>
+<p class="foot-meta">An index, not a code store — releases map to git coordinates; docs are advisory metadata. Noeta is pre-alpha and built in the open.</p>
+</div>
+</footer>
 </body>
 </html>`;
 }
