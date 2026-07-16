@@ -55,9 +55,10 @@ Then, against `http://localhost:8787`:
 curl -XPOST localhost:8787/v1/scopes -H 'authorization: Bearer <ADMIN_TOKEN>' \
   -d '{"scope":"acme","token":"a-publish-token-16+chars"}'
 
-# Publish, then read back.
+# Publish, then read back. `deps` is optional: an array of {package, req} pairs.
 curl -XPOST localhost:8787/v1/packages/acme/imgfx -H 'authorization: Bearer a-publish-token-16+chars' \
-  -d '{"version":"1.2.0","url":"https://github.com/acme/imgfx","tag":"v1.2.0","sha":"e3b0c44…"}'
+  -d '{"version":"1.2.0","url":"https://github.com/acme/imgfx","tag":"v1.2.0","sha":"e3b0c44…",
+       "deps":[{"package":"acme/pixbuf","req":"^0.4"}]}'
 curl localhost:8787/v1/packages/acme/imgfx
 ```
 
