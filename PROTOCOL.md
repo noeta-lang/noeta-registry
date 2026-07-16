@@ -121,6 +121,36 @@ Serve a release's stored documentation artifact **verbatim** (the `docs.json`, n
 404 Not Found   no docs stored for this (name, version)
 ```
 
+## `PUT /v1/packages/{company}/{package}/readme/{version}`
+
+Store a release's **README** — the raw markdown of the package's `README.md`, uploaded by
+`noeta publish` and rendered on the package's browser page (the npm/crates.io model; the registry
+never fetches source, so a README is only ever what the publisher uploads). Requires
+`Authorization: Bearer <token>` owning `{company}` (same auth as publish). The body is the
+**verbatim markdown** (`content-type: text/markdown`), non-empty and ≤ 256 KiB. The
+`(company/package, version)` must already be **published** — a README belongs to a release.
+
+```
+200 OK               readme stored (last-wins — a re-upload overwrites)
+404 Not Found        that (name, version) is not published
+401 / 403            missing/invalid token, or token does not own {company}
+400 Bad Request      empty body
+413 Payload Too Large  README exceeds 256 KiB
+```
+
+Like docs, a README is **advisory metadata, not provenance**: unsigned and mutable, never part of
+the immutable release record; the web renderer treats it as untrusted input (escape-first, under a
+strict CSP).
+
+## `GET /v1/packages/{company}/{package}/readme/{version}`
+
+Serve a release's stored README **verbatim**, or `404` if none is stored.
+
+```
+200 OK   <the README markdown, text/markdown>
+404 Not Found   no readme stored for this (name, version)
+```
+
 ## `POST /v1/scopes/claim` — self-service scope claim (GitHub-proven)
 
 Claim a scope by **proving you control the GitHub org/user of the same name**. Two proofs, one from

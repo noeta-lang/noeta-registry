@@ -75,11 +75,17 @@ const API_DOCS = JSON.stringify({
   ],
 });
 
+// A README whose markdown deliberately carries an XSS payload, to prove the package page renders
+// publisher READMEs through the same escape-first pipeline as doc prose.
+const README =
+  "# greeter\n\nA **friendly** greeting library.\n\n<script>alert(2)</script>\n\n```sh\nnoeta add acme/greeter\n```";
+
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
   await post("/packages/acme/greeter", { version: "1.0.0", url: "https://github.com/acme/greeter", tag: "v1.0.0", sha: "aaa" }, TOKEN);
   await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: "bbb" }, TOKEN);
   expect((await putText("/packages/acme/greeter/docs/1.1.0", DOCS, TOKEN)).status).toBe(200);
+  expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
   expect((await putText("/packages/acme/std/docs/1.0.0", API_DOCS, TOKEN)).status).toBe(200);
 });
@@ -103,6 +109,17 @@ describe("registry web UI", () => {
     expect(body).toContain("bbb"); // pinned commit of the latest
     // A docs link, because 1.1.0 has docs.
     expect(body).toContain("/acme/greeter/1.1.0/docs");
+  });
+
+  it("renders the version's README on the package page, escaped", async () => {
+    const body = await (await web("/acme/greeter")).text();
+    expect(body).toContain("A <strong>friendly</strong> greeting library.");
+    expect(body).toContain("noeta add acme/greeter"); // the fenced block survives
+    expect(body).not.toContain("<script>alert(2)</script>"); // escaped, not executable
+    expect(body).toContain("&lt;script&gt;alert(2)&lt;/script&gt;");
+    // 1.0.0 has no README — its page renders without one.
+    const old = await (await web("/acme/greeter/1.0.0")).text();
+    expect(old).not.toContain("friendly");
   });
 
   it("renders documentation from the stored docs.json", async () => {

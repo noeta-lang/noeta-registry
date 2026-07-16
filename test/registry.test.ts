@@ -185,6 +185,37 @@ describe("noeta registry", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("stores and serves a release's README verbatim (last-wins)", async () => {
+    await post("/packages/acme/readmed", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    // No README yet.
+    expect((await get("/packages/acme/readmed/readme/1.0.0")).status).toBe(404);
+    // Upload; it comes back verbatim as markdown (raw text, not JSON-wrapped).
+    const up = await putText("/packages/acme/readmed/readme/1.0.0", "# readmed\n\nHello.", TOKEN);
+    expect(up.status).toBe(200);
+    const got = await get("/packages/acme/readmed/readme/1.0.0");
+    expect(got.status).toBe(200);
+    expect(got.headers.get("content-type")).toContain("text/markdown");
+    expect(await got.text()).toBe("# readmed\n\nHello.");
+    // Re-upload overwrites (advisory, last-wins — unlike the immutable release).
+    const up2 = await putText("/packages/acme/readmed/readme/1.0.0", "# readmed v2", TOKEN);
+    expect(up2.status).toBe(200);
+    expect(await (await get("/packages/acme/readmed/readme/1.0.0")).text()).toBe("# readmed v2");
+  });
+
+  it("refuses a README for an unpublished release, requires scope ownership, and bounds its size", async () => {
+    const orphan = await putText("/packages/acme/nope/readme/1.0.0", "# hi", TOKEN);
+    expect(orphan.status).toBe(404); // the release doesn't exist
+    await post("/packages/acme/readguard", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    const noauth = await putText("/packages/acme/readguard/readme/1.0.0", "# hi");
+    expect(noauth.status).toBe(401);
+    const wrong = await putText("/packages/acme/readguard/readme/1.0.0", "# hi", "wrong");
+    expect(wrong.status).toBe(403);
+    const empty = await putText("/packages/acme/readguard/readme/1.0.0", "", TOKEN);
+    expect(empty.status).toBe(400);
+    const huge = await putText("/packages/acme/readguard/readme/1.0.0", "x".repeat(256 * 1024 + 1), TOKEN);
+    expect(huge.status).toBe(413);
+  });
+
   it("stores and serves a keyless provenance bundle verbatim (no scope key needed)", async () => {
     // A keyless bundle is stored without server-side verification — its trust root is Sigstore's
     // public infrastructure, and the consumer verifies it offline. So `bundle` round-trips even for

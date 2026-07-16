@@ -167,6 +167,12 @@ async function route(request: Request, env: Env): Promise<Response> {
       if (request.method === "PUT") return putDocs(request, env, company, name, parts[5]);
       if (request.method === "GET") return getDocs(env, name, parts[5]);
     }
+    // README artifact: same shape as docs, but the blob is raw markdown, rendered on the
+    // package's browser page rather than the /docs page.
+    if (parts.length === 6 && parts[4] === "readme") {
+      if (request.method === "PUT") return putReadme(request, env, company, name, parts[5]);
+      if (request.method === "GET") return getReadme(env, name, parts[5]);
+    }
   }
 
   return json({ error: "not found" }, 404);
@@ -265,6 +271,58 @@ async function getDocs(env: Env, name: string, version: string): Promise<Respons
   // The stored blob is the client's `docs.json` verbatim — serve it as-is, not re-wrapped.
   return new Response(row.docs_json, {
     headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+/** The maximum stored README size (bytes). A README is prose, not an API surface — far smaller
+ *  than a docs artifact; anything past this is a 413 (and likely not a README). */
+const MAX_README_BYTES = 256 * 1024;
+
+/** PUT …/readme/{version} — store a release's README markdown (advisory, scope-owned, last-wins).
+ *  Same rules as docs: the release must be published, and the blob never affects resolution. The
+ *  body is raw markdown — no JSON validation; the web renderer is escape-first, so the registry
+ *  stores it verbatim and the trust boundary is at render time. */
+async function putReadme(
+  request: Request,
+  env: Env,
+  company: string,
+  name: string,
+  version: string,
+): Promise<Response> {
+  if (!SEMVER.test(version)) return json({ error: "version must be semver" }, 400);
+  const auth = await authorizeScope(request, env, company);
+  if (auth instanceof Response) return auth;
+
+  const body = await request.text();
+  if (body.length > MAX_README_BYTES) {
+    return json({ error: `README exceeds ${MAX_README_BYTES} bytes` }, 413);
+  }
+  if (body.length === 0) return json({ error: "README body must be non-empty markdown" }, 400);
+
+  // A README belongs to a published release — refuse an orphan for a version that doesn't exist.
+  const release = await env.DB.prepare("SELECT 1 FROM packages WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first();
+  if (!release) return json({ error: `${name}@${version} is not published` }, 404);
+
+  await env.DB.prepare(
+    "INSERT INTO readmes (name, version, readme_md, updated_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(name, version) DO UPDATE SET readme_md = excluded.readme_md, updated_at = excluded.updated_at",
+  )
+    .bind(name, version, body, new Date().toISOString())
+    .run();
+  return json({ status: "readme stored", name, version });
+}
+
+/** GET …/readme/{version} — serve a release's stored README verbatim (404 if none). */
+async function getReadme(env: Env, name: string, version: string): Promise<Response> {
+  if (!SEMVER.test(version)) return json({ error: "version must be semver" }, 400);
+  const row = await env.DB.prepare("SELECT readme_md FROM readmes WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first<{ readme_md: string }>();
+  if (!row) return json({ error: `no readme stored for ${name}@${version}` }, 404);
+  return new Response(row.readme_md, {
+    headers: { "content-type": "text/markdown; charset=utf-8" },
   });
 }
 
