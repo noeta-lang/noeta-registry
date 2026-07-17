@@ -152,8 +152,23 @@ async function homePage(env: Env): Promise<string> {
      <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. Search for a package,
      or browse what's been published below.</p>
      ${searchForm("", true)}
-     <h2>Recently published</h2>
-     ${list}`,
+     <div class="home-grid">
+       <section class="home-main">
+         <h2>Recently published</h2>
+         ${list}
+       </section>
+       <aside class="start-card">
+         <h3>New to Noeta?</h3>
+         <p>Install the toolchain, write your first package, and publish it to the registry.</p>
+         <a class="button" href="https://docs.noeta.dev/getting-started">Getting started →</a>
+         <ul class="start-links">
+           <li><a href="https://docs.noeta.dev/language-tour">Language tour</a></li>
+           <li><a href="https://docs.noeta.dev/the-cli">Publishing a package</a></li>
+           <li><a href="https://docs.noeta.dev">All documentation</a></li>
+         </ul>
+       </aside>
+     </div>`,
+    "wide",
   );
 }
 
@@ -601,6 +616,7 @@ async function searchPage(env: Env, rawQuery: string): Promise<Page> {
        ${searchForm(rawQuery)}
        ${heading}
        ${body}`,
+      "wide",
     ),
   };
 }
@@ -670,6 +686,7 @@ async function keywordPage(env: Env, keyword: string): Promise<Page> {
        <p class="lead">${total} package${total === 1 ? "" : "s"} tagged
        <code>${esc(keyword)}</code>.</p>
        ${list}`,
+      "wide",
     ),
   };
 }
@@ -686,6 +703,7 @@ function notFoundPage(message = "That page does not exist."): string {
   return layout(
     "Not found — Noeta registry",
     `<h1>Not found</h1><p class="muted">${esc(message)}</p><p><a href="/">← registry</a></p>`,
+    "wide",
   );
 }
 
@@ -1110,6 +1128,18 @@ ul.results{list-style:none;padding:0;margin:1.2rem 0 0}
 .result-meta{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem .6rem;font-size:.82rem}
 .page a.result-tag{font-family:var(--font-mono);font-size:.74rem;color:var(--text-2);border:1px solid var(--line);border-radius:999px;padding:.05rem .5rem}
 .page a.result-tag:hover{border-color:var(--accent-2);color:var(--accent-2-bright);text-decoration:none}
+/* home: recently-published beside a getting-started card, mirroring the package page's main+rail */
+.home-grid{display:grid;grid-template-columns:minmax(0,1fr) 18rem;gap:clamp(1.5rem,4vw,3rem);align-items:start;margin-top:.5rem}
+.home-main{min-width:0}
+.home-main>:first-child{margin-top:0}
+.start-card{border:1px solid var(--line);border-radius:var(--radius);background:color-mix(in srgb,var(--surface-1) 60%,transparent);padding:1.1rem 1.2rem}
+.start-card h3{margin:0 0 .5rem;font-size:1.05rem}
+.start-card p{color:var(--text-1);font-size:.9rem;margin:0 0 .9rem}
+.start-card .button{width:100%;justify-content:center;font-size:.82rem}
+ul.start-links{list-style:none;padding:0;margin:1rem 0 0;display:flex;flex-direction:column;gap:.5rem}
+.page ul.start-links a{font-family:var(--font-mono);font-size:.82rem;color:var(--text-1)}
+.page ul.start-links a:hover{color:var(--accent-bright)}
+@media (max-width:52rem){.home-grid{grid-template-columns:1fr}.start-card{order:-1}}
 /* package list */
 ul.pkglist{list-style:none;padding:0;margin:.6rem 0 0}
 ul.pkglist li{display:flex;align-items:baseline;flex-wrap:wrap;gap:.55rem;padding:.6rem .2rem;border-bottom:1px solid var(--line)}

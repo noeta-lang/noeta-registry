@@ -128,6 +128,9 @@ describe("registry web UI", () => {
     expect(body).toContain("/acme/greeter");
     // The latest release's license shows in the listing (greeter 1.1.0 declared one).
     expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
+    // The getting-started card points newcomers at the docs.
+    expect(body).toContain("New to Noeta?");
+    expect(body).toContain(`href="https://docs.noeta.dev/getting-started"`);
   });
 
   it("pins every served script in the CSP by its real hash", async () => {
