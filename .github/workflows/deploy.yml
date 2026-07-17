@@ -1,0 +1,54 @@
+name: Build and deploy
+
+# Push to main → run the test suite, apply D1 migrations to production, then deploy the Worker.
+#
+# The registry is a dependency-free Cloudflare Worker (no build step, no @noeta/theme — it inlines
+# its own Signal tokens). Migrations run BEFORE deploy so new code never meets an old schema;
+# `wrangler d1 migrations apply` is idempotent (it tracks applied files in d1_migrations), so
+# re-running every push is safe. Keep migrations additive so a deploy that fails after a successful
+# migration leaves the previous Worker version compatible.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test (typecheck + suite)
+        run: pnpm run test
+
+      - name: Apply D1 migrations (production)
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply noeta-registry --remote
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
