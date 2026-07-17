@@ -90,9 +90,8 @@ async function homePage(env: Env): Promise<string> {
     "Noeta registry",
     `<p class="eyebrow">Package registry</p>
      <h1>The Noeta registry</h1>
-     <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. An index, not a code
-     store: each release maps to the git coordinates its source lives at, with pinned commit and
-     optional provenance. Browse published packages and their documentation below.</p>
+     <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. Browse published
+     packages and their documentation below.</p>
      <h2>Recently published</h2>
      ${list}`,
   );
@@ -637,7 +636,7 @@ ${body}
 <a href="https://play.noeta.dev">playground</a>
 <a href="https://github.com/noeta-lang/noeta">github</a>
 </nav>
-<p class="foot-meta">An index, not a code store — releases map to git coordinates; docs are advisory metadata. Noeta is pre-alpha and built in the open.</p>
+<p class="foot-meta">Noeta is pre-alpha and built in the open — anything may change without notice.</p>
 </div>
 </footer>
 </body>
