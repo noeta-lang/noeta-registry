@@ -445,3 +445,48 @@ describe("keywords", () => {
     expect(await r.json()).toMatchObject({ error: expect.stringContaining("reserved") });
   });
 });
+
+describe("description", () => {
+  it("stores and echoes a release's description", async () => {
+    const r = await post(
+      "/packages/acme/desc",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", description: "  Fast image effects for Noeta.  " },
+      TOKEN,
+    );
+    expect(r.status).toBe(201);
+    // Trimmed on the way in, echoed back on publish and on GET.
+    expect(await r.json()).toMatchObject({ description: "Fast image effects for Noeta." });
+    const versions = (await (await get("/packages/acme/desc")).json()) as {
+      versions: { description?: string }[];
+    };
+    expect(versions.versions[0].description).toBe("Fast image effects for Noeta.");
+  });
+
+  it("omits description entirely when a release declares none", async () => {
+    await post("/packages/acme/nodesc", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    const body = (await (await get("/packages/acme/nodesc")).json()) as { versions: Record<string, unknown>[] };
+    expect("description" in body.versions[0]).toBe(false);
+  });
+
+  it("rejects a non-string, over-long, or multi-line description", async () => {
+    const bad = async (description: unknown) =>
+      (await post("/packages/acme/descbad", { version: "9.0.0", url: "u", tag: "t", sha: "s", description }, TOKEN)).status;
+    expect(await bad(42)).toBe(400); // not a string
+    expect(await bad("a".repeat(201))).toBe(400); // over 200 chars
+    expect(await bad("line one\nline two")).toBe(400); // newline (control char)
+    expect(await bad("   ")).toBe(400); // empty after trim
+  });
+
+  it("treats a re-publish that only changes the description as immutable", async () => {
+    const body = { version: "3.0.0", url: "u", tag: "t", sha: "s", description: "First." };
+    expect((await post("/packages/acme/descim", body, TOKEN)).status).toBe(201);
+    expect((await post("/packages/acme/descim", body, TOKEN)).status).toBe(200); // idempotent
+    expect((await post("/packages/acme/descim", { ...body, description: "Second." }, TOKEN)).status).toBe(409);
+  });
+
+  it("reserves the `search` scope, which the web browser owns as a URL", async () => {
+    const r = await post("/scopes", { scope: "search", token: "a-sufficiently-long-token" }, ADMIN);
+    expect(r.status).toBe(403);
+    expect(await r.json()).toMatchObject({ error: expect.stringContaining("reserved") });
+  });
+});

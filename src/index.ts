@@ -55,6 +55,7 @@ interface VersionRow {
   yanked: number;
   published_at: string; // ISO-8601 UTC publish time (for the client's publish-cooldown window)
   license: string | null; // declared SPDX expression, or null (immutable with the release)
+  description: string | null; // one-line search blurb, or null
 }
 
 interface Dep {
@@ -69,6 +70,8 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
 /** Enough to place a package; few enough that a keyword still means something (crates.io's limit). */
 const MAX_KEYWORDS = 5;
+/** A one-line search blurb — long enough to be useful, short enough to stay a single result-card row. */
+const MAX_DESCRIPTION = 200;
 
 // Reserved namespaces (namespace-protection arcs #2/#1) — MUST match noeta-pm's `reserved` module.
 // `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
@@ -90,7 +93,7 @@ const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-dev"]]);
 // Deliberately separate from BUILTIN_SCOPES: that set means "the compiler provides this, it can never
 // be a package", and noeta-pm mirrors it. This one is a registry-server URL concern the client has no
 // stake in — resolution semantics are unchanged, so noeta-pm needs no matching entry.
-const RESERVED_WEB_SCOPES = new Set(["keywords"]);
+const RESERVED_WEB_SCOPES = new Set(["keywords", "search"]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -205,7 +208,7 @@ async function keywordsFor(env: Env, name: string, version: string): Promise<str
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
-    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at, license FROM packages WHERE name = ? ORDER BY version",
+    "SELECT version, url, tag, sha, deps, sig, bundle, yanked, published_at, license, description FROM packages WHERE name = ? ORDER BY version",
   )
     .bind(name)
     .all<VersionRow>();
@@ -240,6 +243,7 @@ async function getVersions(env: Env, name: string): Promise<Response> {
       published_at_unix: Number.isNaN(ms) ? undefined : ms,
       license: r.license ?? undefined,
       keywords: keywordsByVersion.get(r.version),
+      description: r.description ?? undefined,
     };
   });
   return json({ name, versions });
@@ -396,6 +400,9 @@ async function publish(request: Request, env: Env, company: string, name: string
   const keywords = validateKeywords((body as Record<string, unknown>).keywords);
   if (keywords instanceof Response) return keywords;
 
+  const description = validateDescription((body as Record<string, unknown>).description);
+  if (description instanceof Response) return description;
+
   // Optional declared license — an SPDX expression like "MIT OR Apache-2.0". Part of the immutable
   // release record (and bound into the log leaf below), unlike advisory docs/READMEs: consumers and
   // audit tooling must be able to trust what the index said at resolve time. Shape-checked only
@@ -484,18 +491,19 @@ async function publish(request: Request, env: Env, company: string, name: string
   }
 
   const existing = await env.DB.prepare(
-    "SELECT url, tag, sha, deps, license FROM packages WHERE name = ? AND version = ?",
+    "SELECT url, tag, sha, deps, license, description FROM packages WHERE name = ? AND version = ?",
   )
     .bind(name, version)
-    .first<{ url: string; tag: string; sha: string; deps: string; license: string | null }>();
+    .first<{ url: string; tag: string; sha: string; deps: string; license: string | null; description: string | null }>();
   if (existing) {
-    // Idempotent re-publish of identical coordinates + deps + license + keywords; otherwise
-    // immutable. Keywords join the comparison so a re-publish that only re-tags is a 409 rather
-    // than a silent no-op that keeps the old tags.
+    // Idempotent re-publish of identical coordinates + deps + license + keywords + description;
+    // otherwise immutable. Every mutable-looking field joins the comparison so a re-publish that
+    // only changes one (e.g. re-tagging or editing the blurb) is a 409, not a silent no-op.
     const existingKeywords = await keywordsFor(env, name, version);
     if (
       existing.url === url && existing.tag === tag && existing.sha === sha &&
       existing.deps === depsJson && existing.license === license &&
+      existing.description === description &&
       existingKeywords.join(" ") === keywords.join(" ")
     ) {
       return json({ status: "already published", name, version }, 200);
@@ -514,10 +522,10 @@ async function publish(request: Request, env: Env, company: string, name: string
   await env.DB.batch([
     env.DB
       .prepare(
-        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at, license) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+        "INSERT INTO packages (name, version, url, tag, sha, deps, sig, bundle, yanked, published_by, published_at, license, description) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
       )
-      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now, license),
+      .bind(name, version, url, tag, sha, depsJson, sig, bundle, company, now, license, description),
     env.DB
       .prepare(
         "INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -530,6 +538,15 @@ async function publish(request: Request, env: Env, company: string, name: string
         .prepare("INSERT INTO package_keywords (name, version, keyword) VALUES (?, ?, ?)")
         .bind(name, version, k),
     ),
+    // Refresh the package's search row to this release. It is by definition the most recent publish
+    // (published_at = now), which is the release search shows — so every publish overwrites the
+    // one-row-per-package FTS entry (delete-by-name + insert). See migrations/0012_search.sql.
+    env.DB.prepare("DELETE FROM package_fts WHERE name = ?").bind(name),
+    env.DB
+      .prepare(
+        "INSERT INTO package_fts (name, description, keywords, version, license, published_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(name, description ?? "", keywords.join(" "), version, license ?? "", now),
   ]);
   return json(
     {
@@ -539,6 +556,7 @@ async function publish(request: Request, env: Env, company: string, name: string
       sha,
       license: license ?? undefined,
       keywords: keywords.length ? keywords : undefined,
+      description: description ?? undefined,
       provenance: sig ? "key" : bundle ? "keyless" : "unsigned",
       log_index: idx,
     },
@@ -845,6 +863,20 @@ function validateKeywords(raw: unknown): string[] | Response {
     return json({ error: `at most ${MAX_KEYWORDS} keywords` }, 400);
   }
   return out.sort();
+}
+
+/** Validate an incoming `description` field: absent → `null`; else a single-line blurb, trimmed,
+ *  ≤ `MAX_DESCRIPTION` chars, no control characters (it's shown inline in search results and on the
+ *  package page, so newlines and control chars have no place). Returns the value or a 400 Response. */
+function validateDescription(raw: unknown): string | null | Response {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") return json({ error: "`description` must be a string" }, 400);
+  const trimmed = raw.trim();
+  // A single inline line: no control characters, which includes newlines and tabs.
+  if (trimmed.length === 0 || trimmed.length > MAX_DESCRIPTION || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return json({ error: `\`description\` must be a single line of ≤ ${MAX_DESCRIPTION} characters` }, 400);
+  }
+  return trimmed;
 }
 
 function json(body: unknown, status = 200): Response {

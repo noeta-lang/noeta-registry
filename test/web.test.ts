@@ -102,6 +102,20 @@ beforeAll(async () => {
     { version: "0.1.0", url: "https://github.com/acme/parakit", tag: "v0.1.0", sha: "eee", keywords: ["para"] },
     TOKEN,
   );
+  // A described package, so search can be exercised by name, keyword, and description text.
+  await post(
+    "/packages/acme/imgfx",
+    {
+      version: "1.2.0",
+      url: "https://github.com/acme/imgfx",
+      tag: "v1.2.0",
+      sha: "fff",
+      license: "MIT",
+      description: "SIMD-accelerated image filters",
+      keywords: ["image", "simd"],
+    },
+    TOKEN,
+  );
 });
 
 describe("registry web UI", () => {
@@ -207,6 +221,47 @@ describe("registry web UI", () => {
 
     // A malformed keyword is not a query.
     expect((await web("/keywords/NotAKeyword")).status).toBe(404);
+  });
+
+  it("searches packages by name, keyword, and description text", async () => {
+    // The front page carries the search box.
+    const home = await (await web("/")).text();
+    expect(home).toContain(`action="/search"`);
+
+    // By name.
+    const byName = await (await web("/search?q=greeter")).text();
+    expect(byName).toContain(`href="/acme/greeter"`);
+    expect(byName).toContain("1 result for");
+
+    // By keyword — both para packages surface.
+    const byKeyword = await (await web("/search?q=para")).text();
+    expect(byKeyword).toContain(`href="/acme/paraext"`);
+    expect(byKeyword).toContain(`href="/acme/parakit"`);
+
+    // By a word from the description — only acme/imgfx has "filters" in its blurb, and the blurb shows.
+    const byDesc = await (await web("/search?q=filters")).text();
+    expect(byDesc).toContain(`href="/acme/imgfx"`);
+    expect(byDesc).toContain("SIMD-accelerated image filters");
+    expect(byDesc).not.toContain(`href="/acme/greeter"`);
+
+    // Prefix matching: "img" finds imgfx.
+    expect(await (await web("/search?q=img")).text()).toContain(`href="/acme/imgfx"`);
+
+    // A no-match query is an empty state, not an error.
+    const none = await (await web("/search?q=zznotapackage")).text();
+    expect(none).toContain("No packages match");
+
+    // An empty query prompts rather than listing everything.
+    expect(await (await web("/search?q=")).text()).toContain("Type a package name");
+  });
+
+  it("never lets a search query reach FTS as a syntax error or operator", async () => {
+    // Quotes, stars, and boolean operators are user text here — reduced to prefix terms, never
+    // MATCH syntax. Each must return 200 (a normal results page), not a 500 from a MATCH parse error.
+    for (const q of [`"unterminated`, `AND OR NOT`, `img*fx"`, `para AND`, `*`, `()`]) {
+      const r = await web(`/search?q=${encodeURIComponent(q)}`);
+      expect(r.status, `query ${JSON.stringify(q)}`).toBe(200);
+    }
   });
 
   it("surfaces advisories on the security tab, per selected release", async () => {

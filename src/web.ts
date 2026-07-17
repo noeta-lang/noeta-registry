@@ -93,6 +93,10 @@ export async function handleWeb(env: Env, parts: string[], params?: URLSearchPar
 async function routeWeb(env: Env, parts: string[], params?: URLSearchParams): Promise<Page> {
   // `/`
   if (parts.length === 0) return { status: 200, body: await homePage(env) };
+  // `/search?q=` — global package search. (`search` is a reserved scope, so no package shadows it.)
+  if (parts.length === 1 && parts[0] === "search") {
+    return searchPage(env, params?.get("q") ?? "");
+  }
   // `/keywords/{keyword}` — every package tagged with it.
   if (parts.length === 2 && parts[0] === "keywords") {
     return keywordPage(env, parts[1]);
@@ -145,8 +149,9 @@ async function homePage(env: Env): Promise<string> {
     "Noeta registry",
     `<p class="eyebrow">Package registry</p>
      <h1>The Noeta registry</h1>
-     <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. Browse published
-     packages and their documentation below.</p>
+     <p class="lead">The package index for <a href="https://noeta.dev">Noeta</a>. Search for a package,
+     or browse what's been published below.</p>
+     ${searchForm("", true)}
      <h2>Recently published</h2>
      ${list}`,
   );
@@ -497,6 +502,107 @@ function renderModule(m: DocsModule, query = ""): string {
     ${toc}
     ${itemsHtml}
   </section>`;
+}
+
+/** A search hit — the FTS index's one row per package (its most-recently-published release). */
+interface SearchRow {
+  name: string;
+  description: string;
+  keywords: string;
+  version: string;
+  license: string;
+  published_at: string;
+}
+
+/** The package-search box. Posts a plain GET to `/search`, so it needs no script and its results
+ *  are a real, shareable URL. `big` is the front-page hero variant. */
+function searchForm(query: string, big = false): string {
+  return `<form class="pkgsearch${big ? " pkgsearch-hero" : ""}" method="get" action="/search" role="search">
+    <input type="search" name="q" value="${esc(query)}" placeholder="Search packages…"
+           aria-label="Search packages" autocomplete="off" spellcheck="false"${big ? " autofocus" : ""}>
+    <button type="submit">Search</button>
+  </form>`;
+}
+
+/** One search result card. The name links the package; keyword chips link their listings (so the
+ *  card is not itself an anchor — that would nest links). */
+function renderResult(r: SearchRow): string {
+  const kws = r.keywords ? r.keywords.split(" ").filter(Boolean) : [];
+  const chips = kws
+    .map((k) => `<a class="result-tag" href="/keywords/${esc(k)}">#${esc(k)}</a>`)
+    .join("");
+  return `<li class="result">
+    <div class="result-head">
+      <a class="result-name" href="/${esc(r.name)}">${esc(r.name)}</a>
+      <span class="version">${esc(r.version)}</span>
+      ${r.license ? `<span class="badge license">${esc(r.license)}</span>` : ""}
+    </div>
+    ${r.description ? `<p class="result-desc">${esc(r.description)}</p>` : ""}
+    <div class="result-meta">${chips}<span class="muted">published ${esc(r.published_at.slice(0, 10))}</span></div>
+  </li>`;
+}
+
+/**
+ * `/search?q=` — global package search over the FTS index (name, description, keywords), BM25-ranked
+ * with the name weighted highest. The query is reduced to alphanumeric prefix terms before it reaches
+ * FTS `MATCH`, so no user input can be a MATCH operator or a syntax error.
+ *
+ * `search` is a reserved scope (RESERVED_WEB_SCOPES in index.ts), so no package shadows this route.
+ */
+async function searchPage(env: Env, rawQuery: string): Promise<Page> {
+  // unicode61 splits on non-alphanumerics anyway; reducing to `[a-z0-9]+` terms here means the MATCH
+  // string is only barewords + prefix stars — never a stray quote, `*`, or an AND/OR/NOT operator.
+  const terms = (rawQuery.toLowerCase().match(/[a-z0-9]+/g) ?? []).slice(0, 8);
+  const match = terms.map((t) => `${t}*`).join(" ");
+
+  const LIMIT = 50;
+  let results: SearchRow[] = [];
+  let total = 0;
+  if (match) {
+    const q = await env.DB.prepare(
+      "SELECT name, description, keywords, version, license, published_at FROM package_fts " +
+        `WHERE package_fts MATCH ? ORDER BY bm25(package_fts, 10.0, 2.0, 5.0) LIMIT ${LIMIT}`,
+    )
+      .bind(match)
+      .all<SearchRow>();
+    results = q.results ?? [];
+    // A full page might have more behind it; a partial page is its own count — no second query needed.
+    total =
+      results.length < LIMIT
+        ? results.length
+        : (
+            await env.DB.prepare("SELECT COUNT(*) AS n FROM package_fts WHERE package_fts MATCH ?")
+              .bind(match)
+              .first<{ n: number }>()
+          )?.n ?? results.length;
+  }
+
+  let body: string;
+  if (!match) {
+    body = `<p class="muted">Type a package name, keyword, or a word from a description.</p>`;
+  } else if (results.length === 0) {
+    body = `<p class="muted">No packages match <code>${esc(rawQuery.trim())}</code>.</p>`;
+  } else {
+    const more = total > results.length ? `<p class="muted">Showing the top ${results.length} of ${total}.</p>` : "";
+    body = `<ul class="results">${results.map(renderResult).join("")}</ul>${more}`;
+  }
+
+  const heading = match
+    ? `<p class="lead">${total} result${total === 1 ? "" : "s"} for <code>${esc(rawQuery.trim())}</code>.</p>`
+    : "";
+  const titleQ = rawQuery.trim();
+  return {
+    status: 200,
+    body: layout(
+      titleQ ? `${titleQ} — Noeta registry search` : "Search — Noeta registry",
+      `<nav class="crumb"><a href="/">registry</a> / <span>search</span></nav>
+       <p class="eyebrow">Package search</p>
+       <h1>Search</h1>
+       ${searchForm(rawQuery)}
+       ${heading}
+       ${body}`,
+    ),
+  };
 }
 
 /**
@@ -985,6 +1091,25 @@ ul.keywords li{padding:0}
 .sev{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;padding:.12rem .5rem;border-radius:999px;border:1px solid var(--line-strong);color:var(--text-1)}
 .sev-critical,.sev-high{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 45%,var(--line-strong));background:color-mix(in srgb,var(--danger) 12%,transparent)}
 .sev-medium{color:var(--syn-number);border-color:color-mix(in srgb,var(--syn-number) 40%,var(--line-strong))}
+/* package search — a plain GET form (no script); the hero variant is the front-page one */
+.pkgsearch{display:flex;gap:.6rem;margin:1.4rem 0}
+.pkgsearch input{flex:1;min-width:0;padding:.6rem .85rem;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-1);color:var(--text-0);font-family:var(--font-body);font-size:.95rem}
+.pkgsearch input:focus{outline:none;border-color:var(--accent)}
+.pkgsearch input::placeholder{color:var(--text-2)}
+.pkgsearch button{padding:.6rem 1.2rem;border:1px solid var(--accent);border-radius:8px;background:var(--accent-dim);color:var(--accent-bright);font-family:var(--font-mono);font-size:.85rem;font-weight:500;cursor:pointer;transition:background 160ms ease,transform 160ms ease}
+.pkgsearch button:hover{background:color-mix(in srgb,var(--accent) 22%,transparent);transform:translateY(-1px)}
+.pkgsearch-hero{margin:1.8rem 0 2.4rem}
+.pkgsearch-hero input{padding:.85rem 1.1rem;font-size:1.05rem}
+/* search results */
+ul.results{list-style:none;padding:0;margin:1.2rem 0 0}
+.result{padding:1rem .2rem;border-bottom:1px solid var(--line)}
+.result-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:.6rem}
+.page a.result-name{font-family:var(--font-mono);font-size:1.02rem;font-weight:500;color:var(--text-0)}
+.page a.result-name:hover{color:var(--accent-bright);text-decoration:none}
+.result-desc{margin:.4rem 0 .5rem;color:var(--text-1);max-width:70ch}
+.result-meta{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem .6rem;font-size:.82rem}
+.page a.result-tag{font-family:var(--font-mono);font-size:.74rem;color:var(--text-2);border:1px solid var(--line);border-radius:999px;padding:.05rem .5rem}
+.page a.result-tag:hover{border-color:var(--accent-2);color:var(--accent-2-bright);text-decoration:none}
 /* package list */
 ul.pkglist{list-style:none;padding:0;margin:.6rem 0 0}
 ul.pkglist li{display:flex;align-items:baseline;flex-wrap:wrap;gap:.55rem;padding:.6rem .2rem;border-bottom:1px solid var(--line)}

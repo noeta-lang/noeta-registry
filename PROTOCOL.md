@@ -36,7 +36,8 @@ array (not a 404) so the client has a single success path.
       "published_at": "2026-02-10T09:30:00.000Z",      // ISO-8601 UTC, the stored record
       "published_at_unix": 1770715800000,              // the same instant as epoch milliseconds
       "license": "MIT OR Apache-2.0",                  // omitted when the release declared none
-      "keywords": [ "image", "simd" ] }                // sorted; omitted when the release declared none
+      "keywords": [ "image", "simd" ],                 // sorted; omitted when the release declared none
+      "description": "Fast image effects for Noeta" }  // one-line blurb; omitted when none declared
   ]
 }
 ```
@@ -63,11 +64,13 @@ Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "s
         "deps": [ { "package": "acme/bytes", "req": "^1.0" } ],   // deps optional, default []
         "license": "MIT OR Apache-2.0",                           // optional SPDX expression
         "keywords": [ "image", "simd" ],                          // optional, ≤ 5 discovery tags
+        "description": "Fast image effects for Noeta",            // optional, ≤ 200-char single line
         "signature": "<128-hex>" | "bundle": "<json>" }           // provenance — at most one, optional
 
 201 Created   { "status": "published", "name": "acme/imgfx", "version": "1.2.0", "sha": "e3b0c4…",
                 "license": "MIT OR Apache-2.0",                   // omitted when none declared
                 "keywords": [ "image", "simd" ],                  // omitted when none declared
+                "description": "Fast image effects for Noeta",    // omitted when none declared
                 "provenance": "key" | "keyless" | "unsigned",
                 "log_index": 7 }                                  // the release's transparency-log leaf
 200 OK                              idempotent — identical coordinates already published
@@ -124,14 +127,25 @@ pinned by the golden fixtures (`publish-request-signed.json`, `versions-response
 repos. Optional and omitted-when-absent, so a client or registry that predates the field stays
 compatible in both directions.
 
-**Reserved for the browser.** `keywords` cannot be registered or claimed as a scope: packages live
-at the web browser's root (`/{company}/{package}`), so a `keywords` scope would be shadowed by
-`/keywords/{keyword}`. This is a registry-server URL concern only — unlike the built-in scopes, it
-does not change resolution, so the client does not mirror it.
+**Description (optional).** A single-line blurb, ≤ 200 characters, no control characters — the
+summary shown next to a package in search results and on its page. Declared as `[package]
+description`. Like `keywords`, it is part of the immutable release record but **not** bound into the
+transparency-log leaf (discovery prose, not a resolve-time claim), and it feeds the FTS search index
+alongside the name and keywords. Optional and omitted-when-absent.
+
+**Global package search.** `GET /search?q=…` (the web browser) matches over package names,
+keywords, and descriptions via an FTS5 index (BM25-ranked, name weighted highest), returning one
+result per package — its most-recently-published release. The query is reduced to alphanumeric
+prefix terms before it reaches the index, so no input is a syntax error or a match operator.
+
+**Reserved for the browser.** `keywords` and `search` cannot be registered or claimed as scopes:
+packages live at the web browser's root (`/{company}/{package}`), so those scopes would be shadowed
+by `/keywords/{keyword}` and `/search`. A registry-server URL concern only — unlike the built-in
+scopes it does not change resolution, so the client does not mirror it.
 
 A published `(name, version)` is **immutable**: it can be *yanked* but never overwritten with
-different coordinates, deps, license, or keywords. The `sha` is recorded at publish time so the
-index — not just a consumer's lockfile — is authoritative on "this version = this commit".
+different coordinates, deps, license, keywords, or description. The `sha` is recorded at publish time
+so the index — not just a consumer's lockfile — is authoritative on "this version = this commit".
 
 ## `POST /v1/packages/{company}/{package}/{version}/yank` — body `{ "yanked": true|false }`
 
