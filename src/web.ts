@@ -996,6 +996,9 @@ function layout(title: string, body: string, variant: "" | "wide" = "", extraScr
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The shared @noeta/theme favicon, inlined (the Worker has no build step to import it); the
+     CSP's img-src allows data:. Keep in sync with noeta-theme/assets/favicon.svg. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0d10'/%3E%3Ctext x='32' y='45' text-anchor='middle' font-family='Inter, system-ui, sans-serif' font-weight='700' font-size='40' fill='%234f8ff7'%3En%3C/text%3E%3C/svg%3E">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0d10">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f8fb">
 <title>${esc(title)}</title>
