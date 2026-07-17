@@ -6,5 +6,7 @@ declare module "cloudflare:test" {
     DB: D1Database;
     ADMIN_TOKEN: string;
     TEST_MIGRATIONS: D1Migration[];
+    /** The golden wire fixtures (test/fixtures/wire), raw text keyed by filename. */
+    WIRE_FIXTURES: Record<string, string>;
   }
 }
