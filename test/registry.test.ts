@@ -394,3 +394,54 @@ describe("noeta registry", () => {
     expect(ok.status).toBe(201);
   });
 });
+
+describe("keywords", () => {
+  it("stores, normalizes, and echoes a release's keywords", async () => {
+    const r = await post(
+      "/packages/acme/kw",
+      // Deliberately unsorted, with a duplicate: keywords are a set, stored and echoed sorted.
+      { version: "1.0.0", url: "u", tag: "t", sha: "s", keywords: ["para", "aether", "para"] },
+      TOKEN,
+    );
+    expect(r.status).toBe(201);
+    expect(await r.json()).toMatchObject({ keywords: ["aether", "para"] });
+
+    const versions = (await (await get("/packages/acme/kw")).json()) as {
+      versions: { version: string; keywords?: string[] }[];
+    };
+    expect(versions.versions[0].keywords).toEqual(["aether", "para"]);
+  });
+
+  it("omits keywords entirely when a release declares none", async () => {
+    await post("/packages/acme/nokw", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, TOKEN);
+    const body = (await (await get("/packages/acme/nokw")).json()) as { versions: Record<string, unknown>[] };
+    // The wire convention: optional fields are omitted, never null or [].
+    expect("keywords" in body.versions[0]).toBe(false);
+  });
+
+  it("rejects malformed, over-long, and over-many keywords", async () => {
+    const bad = async (keywords: unknown) =>
+      (await post("/packages/acme/kwbad", { version: "9.0.0", url: "u", tag: "t", sha: "s", keywords }, TOKEN)).status;
+    expect(await bad("para")).toBe(400); // not an array
+    expect(await bad(["Para"])).toBe(400); // uppercase
+    expect(await bad(["-para"])).toBe(400); // must start alphanumeric
+    expect(await bad(["para_ext"])).toBe(400); // underscore is not in the charset
+    expect(await bad(["a".repeat(21)])).toBe(400); // over 20 chars
+    expect(await bad(["a", "b", "c", "d", "e", "f"])).toBe(400); // over the 5-keyword limit
+  });
+
+  it("treats a re-publish that only re-tags as immutable, not a silent no-op", async () => {
+    const body = { version: "2.0.0", url: "u", tag: "t", sha: "s", keywords: ["para"] };
+    expect((await post("/packages/acme/kwim", body, TOKEN)).status).toBe(201);
+    // Byte-identical re-publish is idempotent.
+    expect((await post("/packages/acme/kwim", body, TOKEN)).status).toBe(200);
+    // Different keywords on the same release is a conflict — the tags would otherwise be ignored.
+    expect((await post("/packages/acme/kwim", { ...body, keywords: ["aether"] }, TOKEN)).status).toBe(409);
+  });
+
+  it("reserves the `keywords` scope, which the web browser owns as a URL", async () => {
+    const r = await post("/scopes", { scope: "keywords", token: "a-sufficiently-long-token" }, ADMIN);
+    expect(r.status).toBe(403);
+    expect(await r.json()).toMatchObject({ error: expect.stringContaining("reserved") });
+  });
+});

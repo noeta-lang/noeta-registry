@@ -35,7 +35,8 @@ array (not a 404) so the client has a single success path.
       "yanked": false,
       "published_at": "2026-02-10T09:30:00.000Z",      // ISO-8601 UTC, the stored record
       "published_at_unix": 1770715800000,              // the same instant as epoch milliseconds
-      "license": "MIT OR Apache-2.0" }                 // omitted when the release declared none
+      "license": "MIT OR Apache-2.0",                  // omitted when the release declared none
+      "keywords": [ "image", "simd" ] }                // sorted; omitted when the release declared none
   ]
 }
 ```
@@ -61,10 +62,12 @@ Publish a release. Requires `Authorization: Bearer <token>`; the token must own 
 Body: { "version": "1.2.0", "url": "https://…/acme/imgfx", "tag": "v1.2.0", "sha": "e3b0c4…",
         "deps": [ { "package": "acme/bytes", "req": "^1.0" } ],   // deps optional, default []
         "license": "MIT OR Apache-2.0",                           // optional SPDX expression
+        "keywords": [ "image", "simd" ],                          // optional, ≤ 5 discovery tags
         "signature": "<128-hex>" | "bundle": "<json>" }           // provenance — at most one, optional
 
 201 Created   { "status": "published", "name": "acme/imgfx", "version": "1.2.0", "sha": "e3b0c4…",
                 "license": "MIT OR Apache-2.0",                   // omitted when none declared
+                "keywords": [ "image", "simd" ],                  // omitted when none declared
                 "provenance": "key" | "keyless" | "unsigned",
                 "log_index": 7 }                                  // the release's transparency-log leaf
 200 OK                              idempotent — identical coordinates already published
@@ -102,9 +105,33 @@ release's transparency-log leaf — so what the index said at resolve time is ta
 **publisher-asserted**: the registry never fetches source and cannot verify the claim matches the
 repository's LICENSE file; the SHA pin means a consumer can always check the release's actual tree.
 
+**Keywords (optional).** Up to 5 discovery tags, each 1–20 chars of `[a-z0-9-]` starting
+alphanumeric (`para`, `aether`, `no-std`). They answer the question the index otherwise can't —
+"what builds on top of `para`?" — and are browsable at `/keywords/{keyword}`. A **set**: duplicates
+collapse and both the stored rows and every echo are **sorted**, so the order sent doesn't matter.
+The narrow charset is the point: one canonical spelling per tag is what makes a listing group
+instead of fragmenting across `Aether`/`aether_`/`AEther`.
+
+Part of the immutable release record (a re-publish that only re-tags is a `409`, not a silent
+no-op), but deliberately **not bound into the transparency-log leaf**, unlike `license`. The leaf
+binds what a consumer must trust at resolve time — identity, coordinates, provenance, license. A
+keyword is discovery metadata: tampering with one mis-files a package in a listing; it cannot
+redirect a build or misrepresent a legal claim. Binding it would grow the leaf's record format, and
+every client's parse of it, for no security gain.
+
+> **Not yet pinned by the golden fixtures.** The Worker accepts and serves `keywords` today, but
+> `noeta-pm` does not send them yet (that needs `[package] keywords` in `noeta.toml`), so no fixture
+> pins the shape. Being optional and omitted-when-absent, it is backward compatible in both
+> directions. When the client lands, add `keywords` to the fixtures per the sync rule above.
+
+**Reserved for the browser.** `keywords` cannot be registered or claimed as a scope: packages live
+at the web browser's root (`/{company}/{package}`), so a `keywords` scope would be shadowed by
+`/keywords/{keyword}`. This is a registry-server URL concern only — unlike the built-in scopes, it
+does not change resolution, so the client does not mirror it.
+
 A published `(name, version)` is **immutable**: it can be *yanked* but never overwritten with
-different coordinates, deps, or license. The `sha` is recorded at publish time so the index — not
-just a consumer's lockfile — is authoritative on "this version = this commit".
+different coordinates, deps, license, or keywords. The `sha` is recorded at publish time so the
+index — not just a consumer's lockfile — is authoritative on "this version = this commit".
 
 ## `POST /v1/packages/{company}/{package}/{version}/yank` — body `{ "yanked": true|false }`
 

@@ -80,14 +80,28 @@ const API_DOCS = JSON.stringify({
 const README =
   "# greeter\n\nA **friendly** greeting library.\n\n<script>alert(2)</script>\n\n```sh\nnoeta add acme/greeter\n```";
 
+const LATEST_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
+
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
   await post("/packages/acme/greeter", { version: "1.0.0", url: "https://github.com/acme/greeter", tag: "v1.0.0", sha: "aaa" }, TOKEN);
-  await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: "bbb", license: "MIT OR Apache-2.0" }, TOKEN);
+  // A full-length SHA, so the page's rendering of it is exercised at its real width.
+  await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: LATEST_SHA, license: "MIT OR Apache-2.0" }, TOKEN);
   expect((await putText("/packages/acme/greeter/docs/1.1.0", DOCS, TOKEN)).status).toBe(200);
   expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
   expect((await putText("/packages/acme/std/docs/1.0.0", API_DOCS, TOKEN)).status).toBe(200);
+  // Two tagged packages, to prove a keyword listing groups rather than just echoing one row.
+  await post(
+    "/packages/acme/paraext",
+    { version: "0.3.0", url: "https://github.com/acme/paraext", tag: "v0.3.0", sha: "ddd", keywords: ["para", "aether"] },
+    TOKEN,
+  );
+  await post(
+    "/packages/acme/parakit",
+    { version: "0.1.0", url: "https://github.com/acme/parakit", tag: "v0.1.0", sha: "eee", keywords: ["para"] },
+    TOKEN,
+  );
 });
 
 describe("registry web UI", () => {
@@ -102,20 +116,115 @@ describe("registry web UI", () => {
     expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
   });
 
-  it("shows a package page with the latest version, source, and version list", async () => {
+  it("shows the latest release with its metadata rail and a repository link", async () => {
     const body = await (await web("/acme/greeter")).text();
     // Latest by semver (1.1.0 > 1.0.0 — not lexicographic).
-    expect(body).toMatch(/greeter<\/a>?[\s\S]*1\.1\.0/);
-    expect(body).toContain("1.0.0"); // the older version is still listed
-    expect(body).toContain("github.com/acme/greeter");
-    expect(body).toContain("bbb"); // pinned commit of the latest
-    // A docs link, because 1.1.0 has docs.
+    expect(body).toContain(`<h1>acme/greeter <span class="version">1.1.0</span></h1>`);
+    // The full pinned commit, not a truncation: the index is authoritative on version→commit, so
+    // the value a reader verifies against must be on the page and selectable.
+    expect(body).toContain(`<td class="mono sha">${LATEST_SHA}</td>`);
+    // The rail tells you how to actually depend on it.
+    // Shell continuations keep the whole command visible in the narrow rail; it pastes as-is.
+    expect(body).toContain("noeta add \\\n  --package acme/greeter \\\n  --version ^1.1.0");
+    // Escape-first: the quotes are entity-escaped in the source and render as `"` in the browser.
+    expect(body).toContain(
+      `greeter = { version = &quot;^1.1.0&quot;, package = &quot;acme/greeter&quot; }`,
+    );
+    // A repository button — the release's git URL, labelled by destination.
+    expect(body).toContain(`href="https://github.com/acme/greeter"`);
+    expect(body).toContain("github.com/acme/greeter →");
+    // A docs tab, because 1.1.0 has docs.
     expect(body).toContain("/acme/greeter/1.1.0/docs");
     // The declared license, as a badge on the selected version.
     expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
     // 1.0.0 declared none — its page shows no license badge.
     const old = await (await web("/acme/greeter/1.0.0")).text();
-    expect(old).not.toContain(`badge license`);
+    expect(old).not.toContain(`<span class="badge license">`);
+  });
+
+  it("splits the release into linkable tabs, each keeping the shell", async () => {
+    const versions = await (await web("/acme/greeter/1.1.0/versions")).text();
+    expect(versions).toContain("2 Versions");
+    expect(versions).toContain(`href="/acme/greeter/1.0.0"`); // the older release is still listed
+    expect(versions).toContain(`<tr class="here">`); // the selected version is marked
+    // The shell (and the install line) survives the tab switch.
+    expect(versions).toContain("noeta add \\\n  --package acme/greeter \\\n  --version ^1.1.0");
+
+    const deps = await (await web("/acme/greeter/1.1.0/deps")).text();
+    expect(deps).toContain("0 Dependencies");
+    expect(deps).toContain("This release declares no dependencies.");
+
+    // The readme URL is the bare version — `/readme` is not a second address for it.
+    expect((await web("/acme/greeter/1.1.0/readme")).status).toBe(404);
+  });
+
+  it("marks the documentation tab inert when the release published none", async () => {
+    const body = await (await web("/acme/greeter/1.0.0")).text();
+    expect(body).toContain(`<span class="tab is-off">Documentation</span>`);
+    expect(body).not.toContain(`/acme/greeter/1.0.0/docs"`);
+  });
+
+  it("shows keyword chips and browses packages by keyword", async () => {
+    // Chips on the package page, sorted, each linking its listing.
+    const pkg = await (await web("/acme/paraext")).text();
+    expect(pkg).toContain(`<a href="/keywords/aether">#aether</a>`);
+    expect(pkg).toContain(`<a href="/keywords/para">#para</a>`);
+
+    // The listing answers "what builds on para?" — both packages, not just the tagged release.
+    const para = await (await web("/keywords/para")).text();
+    expect(para).toContain("<h1>#para</h1>");
+    expect(para).toContain("2 packages tagged");
+    expect(para).toContain(`href="/acme/paraext"`);
+    expect(para).toContain(`href="/acme/parakit"`);
+
+    // A narrower keyword lists only its own.
+    const aether = await (await web("/keywords/aether")).text();
+    expect(aether).toContain("1 package tagged");
+    expect(aether).toContain(`href="/acme/paraext"`);
+    expect(aether).not.toContain(`href="/acme/parakit"`);
+
+    // A keyword nobody used is an empty listing, not a 404.
+    const none = await (await web("/keywords/nobody-uses-this")).text();
+    expect(none).toContain("No packages are tagged");
+
+    // A malformed keyword is not a query.
+    expect((await web("/keywords/NotAKeyword")).status).toBe(404);
+  });
+
+  it("surfaces advisories on the security tab, per selected release", async () => {
+    // No advisory names acme/std, so its tab says so rather than showing an empty list.
+    expect(await (await web("/acme/std/1.0.0/security")).text()).toContain(
+      "No advisories have been published against this package.",
+    );
+
+    const adv = await post(
+      "/advisories",
+      {
+        id: "NOETA-TEST-0001",
+        package: "acme/greeter",
+        ranges: ">=1.0.0, <1.1.0",
+        patched: "1.1.0",
+        severity: "high",
+        summary: "Greeting overflow on a crafted name",
+        details: "A crafted name overflows the greeting buffer.",
+        url: "https://example.test/advisories/1",
+      },
+      ADMIN,
+    );
+    expect(adv.status).toBe(201);
+
+    // 1.0.0 is inside the affected range.
+    const hit = await (await web("/acme/greeter/1.0.0/security")).text();
+    expect(hit).toContain("Greeting overflow on a crafted name");
+    expect(hit).toContain(`<span class="badge yanked">affects 1.0.0</span>`);
+    expect(hit).toContain("1.1.0"); // the patched release is named
+    expect(hit).toContain(`<span class="tab-count is-alert">1</span>`); // and the tab bar flags it
+
+    // 1.1.0 is the patched release — same advisory, opposite verdict, and no alert on the tab.
+    const clear = await (await web("/acme/greeter/1.1.0/security")).text();
+    expect(clear).toContain("Greeting overflow on a crafted name");
+    expect(clear).toContain(`<span class="badge">1.1.0 not affected</span>`);
+    expect(clear).not.toContain(`tab-count is-alert`);
   });
 
   it("renders the version's README on the package page, escaped", async () => {

@@ -65,6 +65,10 @@ interface Dep {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*\/[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
+/** A discovery keyword: one canonical spelling per tag, so a listing groups instead of fragmenting. */
+const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
+/** Enough to place a package; few enough that a keyword still means something (crates.io's limit). */
+const MAX_KEYWORDS = 5;
 
 // Reserved namespaces (namespace-protection arcs #2/#1) — MUST match noeta-pm's `reserved` module.
 // `std`/`noeta`/`core` are toolchain built-ins: satisfied by the compiler, never living in a
@@ -78,6 +82,15 @@ const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
 // org** — `para` only by `noeta-dev`. It still flows through the normal OIDC claim, so the first party
 // needs no admin token; the admin bootstrap remains an escape hatch.
 const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-dev"]]);
+
+// Scopes the *web browser* needs for its own URLs. Packages live at the root (`/{company}/{package}`),
+// so a root path the browser owns — `/keywords/{keyword}` — would shadow a same-named scope's
+// packages. Reserving the name keeps that ambiguity from ever existing.
+//
+// Deliberately separate from BUILTIN_SCOPES: that set means "the compiler provides this, it can never
+// be a package", and noeta-pm mirrors it. This one is a registry-server URL concern the client has no
+// stake in — resolution semantics are unchanged, so noeta-pm needs no matching entry.
+const RESERVED_WEB_SCOPES = new Set(["keywords"]);
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -179,6 +192,16 @@ async function route(request: Request, env: Env): Promise<Response> {
   return json({ error: "not found" }, 404);
 }
 
+/** A release's keywords, sorted — the order they were stored in and are echoed in. */
+async function keywordsFor(env: Env, name: string, version: string): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT keyword FROM package_keywords WHERE name = ? AND version = ? ORDER BY keyword",
+  )
+    .bind(name, version)
+    .all<{ keyword: string }>();
+  return (results ?? []).map((r) => r.keyword);
+}
+
 /** GET — every published version (an unknown package is an empty list, not a 404). */
 async function getVersions(env: Env, name: string): Promise<Response> {
   const { results } = await env.DB.prepare(
@@ -186,6 +209,18 @@ async function getVersions(env: Env, name: string): Promise<Response> {
   )
     .bind(name)
     .all<VersionRow>();
+  // One query for the package's keywords, grouped in memory — a per-version query would be N+1.
+  const { results: kwRows } = await env.DB.prepare(
+    "SELECT version, keyword FROM package_keywords WHERE name = ? ORDER BY keyword",
+  )
+    .bind(name)
+    .all<{ version: string; keyword: string }>();
+  const keywordsByVersion = new Map<string, string[]>();
+  for (const r of kwRows ?? []) {
+    const list = keywordsByVersion.get(r.version);
+    if (list) list.push(r.keyword);
+    else keywordsByVersion.set(r.version, [r.keyword]);
+  }
   const versions = (results ?? []).map((r) => {
     // `published_at` (publish-cooldown, namespace-protection #1): echo the stored ISO timestamp and a
     // parsed epoch-millis so the client can apply a cooldown window without an ISO-8601 date parser.
@@ -204,6 +239,7 @@ async function getVersions(env: Env, name: string): Promise<Response> {
       published_at: r.published_at,
       published_at_unix: Number.isNaN(ms) ? undefined : ms,
       license: r.license ?? undefined,
+      keywords: keywordsByVersion.get(r.version),
     };
   });
   return json({ name, versions });
@@ -357,6 +393,9 @@ async function publish(request: Request, env: Env, company: string, name: string
   if (deps instanceof Response) return deps;
   const depsJson = JSON.stringify(deps);
 
+  const keywords = validateKeywords((body as Record<string, unknown>).keywords);
+  if (keywords instanceof Response) return keywords;
+
   // Optional declared license — an SPDX expression like "MIT OR Apache-2.0". Part of the immutable
   // release record (and bound into the log leaf below), unlike advisory docs/READMEs: consumers and
   // audit tooling must be able to trust what the index said at resolve time. Shape-checked only
@@ -450,10 +489,14 @@ async function publish(request: Request, env: Env, company: string, name: string
     .bind(name, version)
     .first<{ url: string; tag: string; sha: string; deps: string; license: string | null }>();
   if (existing) {
-    // Idempotent re-publish of identical coordinates + deps + license; otherwise immutable.
+    // Idempotent re-publish of identical coordinates + deps + license + keywords; otherwise
+    // immutable. Keywords join the comparison so a re-publish that only re-tags is a 409 rather
+    // than a silent no-op that keeps the old tags.
+    const existingKeywords = await keywordsFor(env, name, version);
     if (
       existing.url === url && existing.tag === tag && existing.sha === sha &&
-      existing.deps === depsJson && existing.license === license
+      existing.deps === depsJson && existing.license === license &&
+      existingKeywords.join(" ") === keywords.join(" ")
     ) {
       return json({ status: "already published", name, version }, 200);
     }
@@ -480,6 +523,13 @@ async function publish(request: Request, env: Env, company: string, name: string
         "INSERT INTO log (idx, leaf_hash, name, version, record, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .bind(idx, leaf, name, version, record, now),
+    // Keywords ride the same batch as the release they describe, so a published release never exists
+    // un-tagged (they are not in the log leaf — see migrations/0011_keywords.sql for why).
+    ...keywords.map((k) =>
+      env.DB
+        .prepare("INSERT INTO package_keywords (name, version, keyword) VALUES (?, ?, ?)")
+        .bind(name, version, k),
+    ),
   ]);
   return json(
     {
@@ -488,6 +538,7 @@ async function publish(request: Request, env: Env, company: string, name: string
       version,
       sha,
       license: license ?? undefined,
+      keywords: keywords.length ? keywords : undefined,
       provenance: sig ? "key" : bundle ? "keyless" : "unsigned",
       log_index: idx,
     },
@@ -537,6 +588,9 @@ async function registerScope(request: Request, env: Env): Promise<Response> {
     // bootstrap, i.e. the first party itself. Open self-service claims are where `para` is guarded,
     // arriving in namespace-protection #1.)
     return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be registered` }, 403);
+  }
+  if (typeof scope === "string" && RESERVED_WEB_SCOPES.has(scope)) {
+    return json({ error: `\`${scope}\` is reserved by the registry's web browser and cannot be registered` }, 403);
   }
   if (typeof scope !== "string" || !IDENT.test(scope) || typeof token !== "string" || token.length < 16) {
     return json({ error: "body must be { scope (identifier), token (>=16 chars) }" }, 400);
@@ -589,6 +643,9 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
   // A built-in scope is never claimable — it lives in the compiler, not the registry.
   if (BUILTIN_SCOPES.has(scope)) {
     return json({ error: `\`${scope}\` is a reserved built-in namespace and cannot be claimed` }, 403);
+  }
+  if (RESERVED_WEB_SCOPES.has(scope)) {
+    return json({ error: `\`${scope}\` is reserved by the registry's web browser and cannot be claimed` }, 403);
   }
 
   // The anti-squat rule: an ordinary scope is claimable by the org/user of the *same* name; a reserved
@@ -762,6 +819,32 @@ function validateDeps(raw: unknown): Dep[] | Response {
     out.push({ package: pkg, req });
   }
   return out;
+}
+
+/** Validate an incoming `keywords` field: absent → `[]`; else up to `MAX_KEYWORDS` topic tags.
+ *
+ *  Keywords are a *set*: duplicates collapse (the table's primary key enforces that anyway) and the
+ *  result is sorted, so the stored rows and every echo of them are deterministic regardless of the
+ *  order the publisher sent. The charset is deliberately narrow — one spelling per tag is what makes
+ *  `#aether` a usable index rather than a pile of near-misses (`Aether`, `aether_`, ` aether`).
+ *  Returns the normalized keywords or a 400 Response. */
+function validateKeywords(raw: unknown): string[] | Response {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return json({ error: "`keywords` must be an array of strings" }, 400);
+  const out: string[] = [];
+  for (const k of raw) {
+    if (typeof k !== "string" || !KEYWORD.test(k)) {
+      return json(
+        { error: "each keyword must be 1–20 chars of lowercase a–z, 0–9 and `-`, starting alphanumeric" },
+        400,
+      );
+    }
+    if (!out.includes(k)) out.push(k);
+  }
+  if (out.length > MAX_KEYWORDS) {
+    return json({ error: `at most ${MAX_KEYWORDS} keywords` }, 400);
+  }
+  return out.sort();
 }
 
 function json(body: unknown, status = 200): Response {

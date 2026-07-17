@@ -12,9 +12,24 @@
 // malicious `docs.json` cannot inject script.
 
 import type { Env } from "./index";
+import { satisfies } from "./semver";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
+/** Mirrors the publish-side KEYWORD in index.ts — the browse route validates before it queries. */
+const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
+
+/** The package page's sections. Each is its own URL: the CSP forbids scripts, so "tabs" are links. */
+const TABS = ["readme", "docs", "versions", "deps", "security"] as const;
+type Tab = (typeof TABS)[number];
+/** How each section names itself in a page <title> — the slug is a route detail, not a label. */
+const TAB_TITLES: Record<Tab, string> = {
+  readme: "readme",
+  docs: "documentation",
+  versions: "versions",
+  deps: "dependencies",
+  security: "security",
+};
 
 interface Row {
   version: string;
@@ -27,6 +42,18 @@ interface Row {
   yanked: number;
   published_at: string;
   license: string | null;
+}
+
+/** An advisory as the Security tab needs it — the feed's own shape lives in `advisory.ts`. */
+interface AdvisoryRow {
+  id: string;
+  ranges: string;
+  patched: string | null;
+  severity: string;
+  summary: string;
+  details: string;
+  url: string;
+  withdrawn: number;
 }
 
 /** A rendered page and its HTTP status. */
@@ -44,19 +71,23 @@ export async function handleWeb(env: Env, parts: string[]): Promise<Response> {
 async function routeWeb(env: Env, parts: string[]): Promise<Page> {
   // `/`
   if (parts.length === 0) return { status: 200, body: await homePage(env) };
-  // `/{company}/{package}[/{version}[/docs]]`
+  // `/keywords/{keyword}` — every package tagged with it.
+  if (parts.length === 2 && parts[0] === "keywords") {
+    return keywordPage(env, parts[1]);
+  }
+  // `/{company}/{package}[/{version}[/{tab}]]`. The readme is the bare version URL, so `/readme`
+  // is not a route — one canonical address per section.
   const [company, pkg, version, sub] = parts;
+  const tab = sub !== undefined && sub !== "readme" && (TABS as readonly string[]).includes(sub) ? (sub as Tab) : null;
   if (
     parts.length >= 2 &&
     parts.length <= 4 &&
     IDENT.test(company) &&
     IDENT.test(pkg) &&
     (version === undefined || SEMVER.test(version)) &&
-    (sub === undefined || sub === "docs")
+    (sub === undefined || tab !== null)
   ) {
-    const name = `${company}/${pkg}`;
-    if (parts.length === 4 && sub === "docs") return docsPage(env, name, version);
-    return packagePage(env, name, version);
+    return packagePage(env, `${company}/${pkg}`, version, tab ?? "readme");
   }
   return { status: 404, body: notFoundPage() };
 }
@@ -97,7 +128,12 @@ async function homePage(env: Env): Promise<string> {
   );
 }
 
-async function packagePage(env: Env, name: string, version?: string): Promise<Page> {
+/**
+ * One release, in five sections. Every tab renders the same shell — header, tab bar, and the
+ * metadata sidebar — around a different main column, so a reader never loses the release's identity
+ * (or its install line) by navigating within it.
+ */
+async function packagePage(env: Env, name: string, version?: string, tab: Tab = "readme"): Promise<Page> {
   const rows = await packageRows(env, name);
   if (rows.length === 0) {
     return { status: 404, body: notFoundPage(`No package \`${name}\` is published.`) };
@@ -106,77 +142,155 @@ async function packagePage(env: Env, name: string, version?: string): Promise<Pa
   if (!selected) {
     return { status: 404, body: notFoundPage(`${name} has no version ${version}.`) };
   }
+  const v = selected.version;
 
+  const [hasDocs, advisories, logIndex, keywords] = await Promise.all([
+    docsExist(env, name, v),
+    advisoriesFor(env, name),
+    logIndexFor(env, name, v),
+    keywordsFor(env, name, v),
+  ]);
+  // A withdrawn advisory is a retraction — it is not a live claim about any version.
+  const live = advisories.filter((a) => a.withdrawn === 0);
+  const affecting = live.filter((a) => satisfies(v, a.ranges) === true);
   const deps = parseDeps(selected.deps);
-  const depsHtml = deps.length
-    ? `<ul class="deps">${deps
-        .map(
-          (d) =>
-            `<li><a href="/${esc(d.package)}">${esc(d.package)}</a> <span class="muted">${esc(d.req)}</span></li>`,
-        )
-        .join("")}</ul>`
-    : `<p class="muted">No dependencies.</p>`;
 
-  const hasDocs = await docsExist(env, name, selected.version);
-  const docsLink = hasDocs
-    ? `<a class="button" href="/${esc(name)}/${esc(selected.version)}/docs">Documentation →</a>`
-    : `<span class="muted">No documentation published.</span>`;
+  let main: string;
+  switch (tab) {
+    case "readme": {
+      // The publisher-uploaded README (npm/crates.io model), rendered through the same escape-first
+      // markdown renderer as doc prose — publisher markdown is untrusted input.
+      const readme = await readmeMd(env, name, v);
+      main = readme
+        ? `<div class="prose readme">${md(readme)}</div>`
+        : `<p class="muted">This release has no README.</p>`;
+      break;
+    }
+    case "docs": {
+      const raw = await docsJson(env, name, v);
+      if (raw === null) {
+        return { status: 404, body: notFoundPage(`No documentation stored for ${name}@${v}.`) };
+      }
+      let doc: DocsArtifact;
+      try {
+        doc = JSON.parse(raw) as DocsArtifact;
+      } catch {
+        return { status: 500, body: notFoundPage("The stored documentation for this release is unreadable.") };
+      }
+      main = docsMain(doc);
+      break;
+    }
+    case "versions":
+      main = versionsMain(name, rows, v);
+      break;
+    case "deps":
+      main = depsMain(deps);
+      break;
+    case "security":
+      main = securityMain(live, v);
+      break;
+  }
 
-  // The publisher-uploaded README (npm/crates.io model), rendered through the same escape-first
-  // markdown renderer as doc prose — publisher markdown is untrusted input.
-  const readme = await readmeMd(env, name, selected.version);
-  const readmeHtml = readme ? `<h2>README</h2><div class="prose readme">${md(readme)}</div>` : "";
-
-  const versionRows = rows
-    .map((r) => {
-      const here = r.version === selected.version;
-      const badges = `${provenanceBadge(r)}${r.yanked ? `<span class="badge yanked">yanked</span>` : ""}`;
-      return `<tr${here ? ' class="here"' : ""}>
-        <td><a href="/${esc(name)}/${esc(r.version)}">${esc(r.version)}</a></td>
-        <td>${badges}</td>
-        <td class="muted mono">${esc(r.published_at.slice(0, 10))}</td>
-      </tr>`;
-    })
-    .join("");
-
+  // The <title> reads as the section a human sees, not the route's internal slug.
+  const title = tab === "readme" ? `${name} — Noeta registry` : `${name} ${v} — ${TAB_TITLES[tab]}`;
   return {
     status: 200,
     body: layout(
-    `${name} — Noeta registry`,
-    `<nav class="crumb"><a href="/">registry</a> / <span>${esc(name)}</span></nav>
-     <h1>${esc(name)} <span class="version">${esc(selected.version)}</span></h1>
-     <p>${provenanceBadge(selected)}${licenseBadge(selected)}${selected.yanked ? `<span class="badge yanked">yanked</span>` : ""}</p>
-     <p class="actions">${docsLink}</p>
-     ${readmeHtml}
-
-     <h2>Source</h2>
-     <table class="kv">
-       <tr><td>repository</td><td>${repoLink(selected.url)}</td></tr>
-       <tr><td>tag</td><td class="mono">${esc(selected.tag)}</td></tr>
-       <tr><td>commit</td><td class="mono">${esc(selected.sha)}</td></tr>
-     </table>
-
-     <h2>Dependencies</h2>
-     ${depsHtml}
-
-     <h2>Versions</h2>
-     <table class="versions"><tbody>${versionRows}</tbody></table>`,
+      title,
+      `<nav class="crumb"><a href="/">registry</a> / <span>${esc(name)}</span></nav>
+       <h1>${esc(name)} <span class="version">${esc(v)}</span></h1>
+       <p class="badges">${provenanceBadge(selected)}${licenseBadge(selected)}${
+         selected.yanked ? `<span class="badge yanked">yanked</span>` : ""
+       }</p>
+       ${keywordChips(keywords)}
+       ${tabBar(name, v, tab, { docs: hasDocs, versions: rows.length, deps: deps.length, affecting: affecting.length })}
+       <div class="pkg-grid">
+         <div class="pkg-main">${main}</div>
+         ${sidebar(name, selected, logIndex)}
+       </div>`,
+      "wide",
     ),
   };
 }
 
-async function docsPage(env: Env, name: string, version: string): Promise<Page> {
-  const raw = await docsJson(env, name, version);
-  if (raw === null) {
-    return { status: 404, body: notFoundPage(`No documentation stored for ${name}@${version}.`) };
-  }
-  let doc: DocsArtifact;
-  try {
-    doc = JSON.parse(raw) as DocsArtifact;
-  } catch {
-    return { status: 500, body: notFoundPage("The stored documentation for this release is unreadable.") };
-  }
+/** The tab bar. Documentation is inert when the release published none — the affordance still says
+ *  so, rather than the link 404ing. */
+function tabBar(
+  name: string,
+  version: string,
+  current: Tab,
+  counts: { docs: boolean; versions: number; deps: number; affecting: number },
+): string {
+  const base = `/${esc(name)}/${esc(version)}`;
+  const link = (tab: Tab, label: string, href: string) =>
+    `<a class="tab${tab === current ? " is-here" : ""}"${tab === current ? ' aria-current="page"' : ""} href="${href}">${label}</a>`;
+  const versions = `${counts.versions} Version${counts.versions === 1 ? "" : "s"}`;
+  const deps = `${counts.deps} ${counts.deps === 1 ? "Dependency" : "Dependencies"}`;
+  const security = counts.affecting
+    ? `Security <span class="tab-count is-alert">${counts.affecting}</span>`
+    : "Security";
+  return `<nav class="tabs" aria-label="Package sections">
+    ${link("readme", "Readme", base)}
+    ${counts.docs ? link("docs", "Documentation", `${base}/docs`) : `<span class="tab is-off">Documentation</span>`}
+    ${link("versions", versions, `${base}/versions`)}
+    ${link("deps", deps, `${base}/deps`)}
+    ${link("security", security, `${base}/security`)}
+  </nav>`;
+}
 
+/** The metadata rail: what the release *is*, and how to depend on it. */
+function sidebar(name: string, r: Row, logIndex: number | null): string {
+  const provenance = r.sig ? "signed (key)" : r.bundle ? "signed (keyless)" : "unsigned";
+  // The import root `noeta add` derives when the key is omitted: the `package` half of `company/pkg`.
+  const key = name.split("/")[1];
+  const req = `^${r.version}`;
+  // Split across shell continuations rather than one long line: the rail is too narrow to show the
+  // whole command, and neither truncating it (the version scrolls out of sight) nor letting it wrap
+  // (line-breaking is allowed after a hyphen, so `--version` splits) is honest. This pastes as-is.
+  const install = `noeta add \\\n  --package ${name} \\\n  --version ${req}`;
+  // Stays a one-line inline table: TOML 1.0 inline tables may not span lines or carry a trailing
+  // comma, so the pretty multi-line form would be a snippet that doesn't parse.
+  const manifest = `${key} = { version = "${req}", package = "${name}" }`;
+  return `<aside class="pkg-side">
+    <h3>Metadata</h3>
+    <table class="kv side-kv">
+      <tr><td>published</td><td class="mono">${esc(r.published_at.slice(0, 10))}</td></tr>
+      <tr><td>license</td><td>${r.license ? esc(r.license) : `<span class="muted">not declared</span>`}</td></tr>
+      <tr><td>provenance</td><td>${esc(provenance)}</td></tr>
+      <tr><td>tag</td><td class="mono">${esc(r.tag)}</td></tr>
+      <!-- The full SHA, wrapped rather than truncated: the index is authoritative on
+           "this version = this commit", so the value a reader verifies against must be on the page
+           and selectable, not hidden behind a tooltip. -->
+      <tr><td>commit</td><td class="mono sha">${esc(r.sha)}</td></tr>
+      ${
+        logIndex !== null
+          ? `<tr><td>log entry</td><td class="mono"><a href="/v1/log/proof/${esc(name)}/${esc(r.version)}">#${logIndex}</a></td></tr>`
+          : ""
+      }
+    </table>
+
+    <h3>Install</h3>
+    <p class="side-note">Run this in your project directory:</p>
+    <pre><code>${esc(install)}</code></pre>
+    <p class="side-note">Or add it to your <code>noeta.toml</code>:</p>
+    <pre><code>${esc(manifest)}</code></pre>
+
+    <h3>Repository</h3>
+    ${
+      /^https?:\/\//i.test(r.url)
+        ? `<p><a class="button side-button" href="${esc(r.url)}">${esc(repoLabel(r.url))} →</a></p>`
+        : `<p class="mono muted">${esc(r.url)}</p>`
+    }
+  </aside>`;
+}
+
+/** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
+function repoLabel(url: string): string {
+  const label = url.replace(/^https?:\/\//i, "").replace(/\.git$/i, "").replace(/\/$/, "");
+  return label.length > 34 ? `${label.slice(0, 33)}…` : label;
+}
+
+function docsMain(doc: DocsArtifact): string {
   const modules = Array.isArray(doc.modules) ? doc.modules : [];
   const nav =
     modules.length > 1
@@ -187,21 +301,74 @@ async function docsPage(env: Env, name: string, version: string): Promise<Page> 
           })
           .join("")}</ul></nav>`
       : "";
-
   const body = modules.length
     ? modules.map(renderModule).join("\n")
     : `<p class="muted">This release has no documented items.</p>`;
+  return `${nav}${body}`;
+}
 
-  return {
-    status: 200,
-    body: layout(
-      `${name} ${version} — documentation`,
-      `<nav class="crumb"><a href="/">registry</a> / <a href="/${esc(name)}">${esc(name)}</a> / <span>${esc(version)} docs</span></nav>
-       <h1>${esc(name)} <span class="version">${esc(version)}</span></h1>
-       ${nav}
-       ${body}`,
-    ),
-  };
+function versionsMain(name: string, rows: Row[], selected: string): string {
+  const versionRows = rows
+    .map((r) => {
+      const here = r.version === selected;
+      const badges = `${provenanceBadge(r)}${r.yanked ? `<span class="badge yanked">yanked</span>` : ""}`;
+      return `<tr${here ? ' class="here"' : ""}>
+        <td><a href="/${esc(name)}/${esc(r.version)}">${esc(r.version)}</a></td>
+        <td>${badges}</td>
+        <td class="muted mono">${esc(r.published_at.slice(0, 10))}</td>
+      </tr>`;
+    })
+    .join("");
+  return `<table class="versions"><tbody>${versionRows}</tbody></table>`;
+}
+
+function depsMain(deps: { package: string; req: string }[]): string {
+  if (deps.length === 0) return `<p class="muted">This release declares no dependencies.</p>`;
+  return `<ul class="deps">${deps
+    .map(
+      (d) =>
+        `<li><a href="/${esc(d.package)}">${esc(d.package)}</a> <span class="muted mono">${esc(d.req)}</span></li>`,
+    )
+    .join("")}</ul>`;
+}
+
+/**
+ * Known advisories against this package. Each is matched against the selected release with the same
+ * comparator semantics the client audits with (`src/semver.ts`), but a range this Worker cannot
+ * parse is reported as *unknown* rather than silently treated as "not affected" — and `noeta audit`
+ * stays the authority either way.
+ */
+function securityMain(advisories: AdvisoryRow[], version: string): string {
+  if (advisories.length === 0) {
+    return `<p class="muted">No advisories have been published against this package.</p>`;
+  }
+  // Match once per advisory, then sort on the result: hits first, unknowns next, misses last.
+  const judged = advisories.map((a) => ({ a, hit: satisfies(version, a.ranges) }));
+  const rank = (hit: boolean | null) => (hit === true ? 0 : hit === null ? 1 : 2);
+  judged.sort((x, y) => rank(x.hit) - rank(y.hit));
+  const items = judged
+    .map(({ a, hit }) => {
+      const verdict =
+        hit === true
+          ? `<span class="badge yanked">affects ${esc(version)}</span>`
+          : hit === false
+            ? `<span class="badge">${esc(version)} not affected</span>`
+            : `<span class="badge">unknown for ${esc(version)}</span>`;
+      return `<article class="advisory${hit === true ? " is-hit" : ""}">
+        <h3><span class="sev sev-${esc(a.severity)}">${esc(a.severity)}</span> ${esc(a.summary)}</h3>
+        <p class="adv-meta">
+          <span class="badge mono">${esc(a.id)}</span>${verdict}
+        </p>
+        <table class="kv">
+          <tr><td>affected</td><td class="mono">${esc(a.ranges)}</td></tr>
+          ${a.patched ? `<tr><td>patched in</td><td class="mono">${esc(a.patched)}</td></tr>` : ""}
+        </table>
+        ${a.details ? `<div class="prose">${md(a.details)}</div>` : ""}
+        ${a.url ? `<p><a href="${sanitizeUrl(a.url)}">${esc(a.url)}</a></p>` : ""}
+      </article>`;
+    })
+    .join("");
+  return `${items}<p class="side-note">Advisory data is served signed at <code>/v1/advisories</code>; <code>noeta audit</code> is the authority for whether a build is affected.</p>`;
 }
 
 function renderModule(m: DocsModule): string {
@@ -243,6 +410,83 @@ function renderModule(m: DocsModule): string {
   </section>`;
 }
 
+/**
+ * `/keywords/{keyword}` — every package carrying the tag, latest release first. The question the
+ * index could not answer before: "what builds on top of para?"
+ *
+ * The `keywords` scope is reserved server-side (see RESERVED_WEB_SCOPES in index.ts), so this route
+ * can never shadow a real package.
+ */
+async function keywordPage(env: Env, keyword: string): Promise<Page> {
+  if (!KEYWORD.test(keyword)) {
+    return { status: 404, body: notFoundPage(`\`${keyword}\` is not a keyword.`) };
+  }
+  // One row per tagged *release*, newest first; the newest release of each package wins the listing.
+  // Bounded like the home page: a keyword on a package with many published versions returns a row
+  // per version, so an unbounded scan would read far more than the page can ever show.
+  const { results } = await env.DB.prepare(
+    "SELECT k.name AS name, k.version AS version, p.license AS license FROM package_keywords k " +
+      "JOIN packages p ON p.name = k.name AND p.version = k.version " +
+      "WHERE k.keyword = ? ORDER BY p.published_at DESC LIMIT 400",
+  )
+    .bind(keyword)
+    .all<{ name: string; version: string; license: string | null }>();
+
+  const seen = new Set<string>();
+  const packages: { name: string; version: string; license: string | null }[] = [];
+  for (const r of results ?? []) {
+    if (seen.has(r.name)) continue;
+    seen.add(r.name);
+    packages.push(r);
+    if (packages.length >= 100) break;
+  }
+
+  // The true total, independent of the listing's bound — so the headline count never silently
+  // undercounts once a keyword outgrows the page.
+  const total =
+    (
+      await env.DB.prepare("SELECT COUNT(DISTINCT name) AS n FROM package_keywords WHERE keyword = ?")
+        .bind(keyword)
+        .first<{ n: number }>()
+    )?.n ?? 0;
+
+  const list = packages.length
+    ? `<ul class="pkglist">${packages
+        .map(
+          (r) =>
+            `<li><a href="/${esc(r.name)}">${esc(r.name)}</a> <span class="muted">${esc(r.version)}</span>${
+              r.license ? ` <span class="badge license">${esc(r.license)}</span>` : ""
+            }</li>`,
+        )
+        .join("")}</ul>${
+        total > packages.length
+          ? `<p class="muted">Showing ${packages.length} of ${total}.</p>`
+          : ""
+      }`
+    : `<p class="muted">No packages are tagged <code>${esc(keyword)}</code>.</p>`;
+
+  return {
+    status: 200,
+    body: layout(
+      `#${keyword} — Noeta registry`,
+      `<nav class="crumb"><a href="/">registry</a> / <span>keywords</span></nav>
+       <p class="eyebrow">Keyword</p>
+       <h1>#${esc(keyword)}</h1>
+       <p class="lead">${total} package${total === 1 ? "" : "s"} tagged
+       <code>${esc(keyword)}</code>.</p>
+       ${list}`,
+    ),
+  };
+}
+
+/** A release's keywords as chips, each linking its listing. */
+function keywordChips(keywords: string[]): string {
+  if (keywords.length === 0) return "";
+  return `<ul class="keywords">${keywords
+    .map((k) => `<li><a href="/keywords/${esc(k)}">#${esc(k)}</a></li>`)
+    .join("")}</ul>`;
+}
+
 function notFoundPage(message = "That page does not exist."): string {
   return layout(
     "Not found — Noeta registry",
@@ -276,6 +520,37 @@ async function docsJson(env: Env, name: string, version: string): Promise<string
     .bind(name, version)
     .first<{ docs_json: string }>();
   return row ? row.docs_json : null;
+}
+
+/** Every advisory naming this package, worst first. Range matching happens in the renderer, which
+ *  knows which release is selected. */
+async function advisoriesFor(env: Env, name: string): Promise<AdvisoryRow[]> {
+  const order = `CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END`;
+  const { results } = await env.DB.prepare(
+    `SELECT id, ranges, patched, severity, summary, details, url, withdrawn FROM advisories ` +
+      `WHERE package = ? ORDER BY ${order}, id`,
+  )
+    .bind(name)
+    .all<AdvisoryRow>();
+  return results ?? [];
+}
+
+/** A release's keywords, sorted (the order they were stored in). */
+async function keywordsFor(env: Env, name: string, version: string): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT keyword FROM package_keywords WHERE name = ? AND version = ? ORDER BY keyword",
+  )
+    .bind(name, version)
+    .all<{ keyword: string }>();
+  return (results ?? []).map((r) => r.keyword);
+}
+
+/** The release's transparency-log index, so the sidebar can link its inclusion proof. */
+async function logIndexFor(env: Env, name: string, version: string): Promise<number | null> {
+  const row = await env.DB.prepare("SELECT idx FROM log WHERE name = ? AND version = ?")
+    .bind(name, version)
+    .first<{ idx: number }>();
+  return row ? row.idx : null;
 }
 
 async function readmeMd(env: Env, name: string, version: string): Promise<string | null> {
@@ -351,11 +626,6 @@ function licenseBadge(r: Row): string {
   return r.license ? `<span class="badge license">${esc(r.license)}</span>` : "";
 }
 
-/** A git URL becomes a link only for http(s); anything else renders as escaped text. */
-function repoLink(url: string): string {
-  if (/^https?:\/\//i.test(url)) return `<a href="${esc(url)}" class="mono">${esc(url)}</a>`;
-  return `<span class="mono">${esc(url)}</span>`;
-}
 
 function esc(s: string): string {
   return s
@@ -497,7 +767,7 @@ function html(body: string, status = 200): Response {
  * a blue human accent and a mint machine accent, the atmospheric `.field` backdrop, a paper light
  * mode that follows the browser preference, and the Inter / JetBrains Mono pair from Google Fonts.
  */
-function layout(title: string, body: string): string {
+function layout(title: string, body: string, variant: "" | "wide" = ""): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -559,8 +829,52 @@ h3{font-family:var(--font-body);font-weight:600;font-size:1.08rem;letter-spacing
 /* buttons */
 .button{display:inline-flex;align-items:center;gap:.5rem;font-family:var(--font-mono);font-size:.875rem;font-weight:500;padding:.6rem 1.2rem;border-radius:8px;border:1px solid var(--line-strong);color:var(--text-0);transition:border-color 180ms ease,background 180ms ease,transform 180ms ease,color 180ms ease}
 .page a.button{color:var(--text-0)}
-.button:hover{border-color:var(--accent);background:var(--accent-dim);color:var(--accent-bright);transform:translateY(-1px);text-decoration:none}
-.actions{margin:1.4rem 0}
+.button:hover{border-color:var(--accent);background:var(--accent-dim);color:var(--accent-bright);transform:translateY(-1px)}
+/* out-specifies .page a:hover, which would otherwise underline a button's label */
+.page a.button:hover{text-decoration:none}
+/* package shell: tab bar + metadata rail. Tabs are links (the CSP forbids scripts), so each
+   section is its own URL and stays linkable/back-navigable. */
+.page.wide{max-width:76rem}
+.badges{margin:.2rem 0 .7rem}
+/* keyword chips — the machine accent, since they are index terms rather than prose */
+ul.keywords{list-style:none;padding:0;margin:0 0 1.15rem;display:flex;flex-wrap:wrap;gap:.35rem .45rem}
+ul.keywords li{padding:0}
+.page ul.keywords a{display:inline-block;padding:.1rem .6rem;border:1px solid var(--line-strong);border-radius:999px;background:color-mix(in srgb,var(--surface-2) 60%,transparent);color:var(--text-1);font-family:var(--font-mono);font-size:.75rem}
+.page ul.keywords a:hover{border-color:var(--accent-2);color:var(--accent-2-bright);text-decoration:none}
+.tabs{display:flex;flex-wrap:wrap;gap:.1rem;border-bottom:1px solid var(--line);margin:0 0 1.7rem}
+.tab{display:inline-flex;align-items:center;gap:.45rem;padding:.55rem .95rem;font-family:var(--font-mono);font-size:.84rem;color:var(--text-1);border-bottom:2px solid transparent;margin-bottom:-1px;transition:color 160ms ease,border-color 160ms ease}
+.page a.tab:hover{color:var(--text-0);border-bottom-color:var(--line-strong);text-decoration:none}
+.page a.tab.is-here{color:var(--accent-bright);border-bottom-color:var(--accent)}
+.tab.is-off{color:var(--text-2);opacity:.5}
+.tab-count{font-family:var(--font-mono);font-size:.7rem;padding:.04rem .42rem;border-radius:999px;background:var(--surface-3);color:var(--text-1)}
+.tab-count.is-alert{background:color-mix(in srgb,var(--danger) 20%,transparent);color:var(--danger)}
+.pkg-grid{display:grid;grid-template-columns:minmax(0,1fr) 17.5rem;gap:clamp(1.5rem,4vw,3rem);align-items:start}
+.pkg-main{min-width:0}
+.pkg-main>:first-child{margin-top:0}
+.pkg-side{position:sticky;top:4.75rem}
+.pkg-side h3{margin:1.6rem 0 .5rem;font-family:var(--font-mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-2);font-weight:500}
+.pkg-side h3:first-child{margin-top:0}
+.side-kv td{font-size:.85rem;padding:.3rem .5rem .3rem 0}
+.side-kv td:first-child{width:6.4rem}
+/* a hex SHA is one unbroken "word" — let it wrap so the whole value stays visible */
+.side-kv td.sha{font-size:.78rem;overflow-wrap:anywhere;line-height:1.45}
+.side-note{font-size:.82rem;color:var(--text-2);margin:.55rem 0 .35rem}
+/* Snippets never wrap: line-breaking is allowed after a hyphen, so a wrapped "--version" splits
+   across lines and reads as a typo. The install command carries its own shell continuations; the
+   one-line TOML table scrolls. */
+.pkg-side pre{padding:.55rem .7rem;white-space:pre;overflow-x:auto}
+.pkg-side pre code{font-size:.75rem;line-height:1.55}
+.side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
+@media (max-width:52rem){.pkg-grid{grid-template-columns:1fr}.pkg-side{position:static;order:-1}}
+/* advisories */
+.advisory{border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.15rem;margin:0 0 1rem;background:color-mix(in srgb,var(--surface-1) 55%,transparent)}
+.advisory.is-hit{border-color:color-mix(in srgb,var(--danger) 45%,var(--line-strong))}
+.advisory h3{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap;margin:0 0 .5rem}
+.advisory table.kv{margin:.2rem 0 .6rem}
+.adv-meta{margin:.35rem 0 .7rem}
+.sev{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;padding:.12rem .5rem;border-radius:999px;border:1px solid var(--line-strong);color:var(--text-1)}
+.sev-critical,.sev-high{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 45%,var(--line-strong));background:color-mix(in srgb,var(--danger) 12%,transparent)}
+.sev-medium{color:var(--syn-number);border-color:color-mix(in srgb,var(--syn-number) 40%,var(--line-strong))}
 /* package list */
 ul.pkglist{list-style:none;padding:0;margin:.6rem 0 0}
 ul.pkglist li{display:flex;align-items:baseline;flex-wrap:wrap;gap:.55rem;padding:.6rem .2rem;border-bottom:1px solid var(--line)}
@@ -624,7 +938,7 @@ pre.sig code{color:var(--text-0)}
 </nav>
 </div>
 </header>
-<main class="page">
+<main class="page${variant ? ` ${variant}` : ""}">
 ${body}
 </main>
 <footer class="site-foot">
