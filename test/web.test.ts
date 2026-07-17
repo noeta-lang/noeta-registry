@@ -116,18 +116,20 @@ describe("registry web UI", () => {
     expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
   });
 
-  it("pins the copy-to-clipboard script in the CSP by its real hash", async () => {
-    // The one allowed script is inline and pinned by SHA-256 — the anti-XSS property only holds if
-    // the hash in the CSP is the hash of the script actually served. Extract both from the page and
-    // recompute, so editing the script without updating the hash (or vice versa) fails here.
-    const body = await (await web("/acme/greeter")).text();
-    const script = body.match(/<script>([\s\S]*?)<\/script>/);
-    expect(script, "the page serves exactly one inline script").not.toBeNull();
-    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(script![1]));
-    const digest = "sha256-" + btoa(String.fromCharCode(...new Uint8Array(hash)));
-    const csp = (await web("/acme/greeter")).headers.get("content-security-policy") ?? "";
-    // A hash source, never a blanket allowance: `script-src '<hash>'` and nothing looser.
-    expect(csp).toContain(`script-src '${digest}'`);
+  it("pins every served script in the CSP by its real hash", async () => {
+    // Inline scripts are allowed only when pinned by SHA-256 — the anti-XSS property holds only if
+    // every script the page serves has its hash in the CSP. The docs tab serves two (copy + docs
+    // search); recompute both from the served bytes and require each in script-src, so editing a
+    // script without updating its hash (or vice versa) fails here.
+    const sha256 = async (s: string) =>
+      "sha256-" + btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))));
+    const r = await web("/acme/greeter/1.1.0/docs");
+    const body = await r.text();
+    const scripts = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    expect(scripts.length, "the docs tab serves the copy and docs-search scripts").toBe(2);
+    const csp = r.headers.get("content-security-policy") ?? "";
+    for (const s of scripts) expect(csp).toContain(`'${await sha256(s)}'`);
+    // Hash sources only, never a blanket allowance.
     const scriptSrc = csp.match(/script-src ([^;]*)/)?.[1] ?? "";
     expect(scriptSrc).not.toContain("'unsafe-inline'");
   });
@@ -275,6 +277,30 @@ describe("registry web UI", () => {
     // A response CSP forbids scripts as defense in depth.
     const r = await web("/acme/greeter/1.1.0/docs");
     expect(r.headers.get("content-security-policy")).toContain("default-src 'none'");
+  });
+
+  it("filters the docs server-side from ?q= (the no-JS search path)", async () => {
+    // std.math has sqrt/pow/new; std.cell has new. A search for "sqrt" should match only sqrt.
+    const body = await (await web("/acme/std/1.0.0/docs?q=sqrt")).text();
+    // The container enters the searching state and the box carries the query back.
+    expect(body).toContain(`class="docs-results searching"`);
+    expect(body).toContain(`value="sqrt"`);
+    expect(body).toContain(`for <code>sqrt</code>`); // the match summary
+    // The matching decl is visible; the misses carry the native `hidden` attribute.
+    expect(body).not.toMatch(/id="std-math--sqrt"[^>]*\bhidden/);
+    expect(body).toMatch(/id="std-math--pow"[^>]*\bhidden/);
+    expect(body).toMatch(/id="std-math--new"[^>]*\bhidden/);
+    // A module with no match is hidden whole.
+    expect(body).toMatch(/id="mod-std-cell"[^>]*\bhidden/);
+
+    // No query → the full docs, no searching state, box empty.
+    const plain = await (await web("/acme/std/1.0.0/docs")).text();
+    expect(plain).toContain(`class="docs-results"`);
+    expect(plain).not.toContain(`docs-results searching`); // not in the searching state
+    expect(plain).not.toMatch(/class="decl"[^>]*\bhidden/); // nothing hidden
+    // The enhancement script rides only the docs tab, never the readme.
+    const readme = await (await web("/acme/std/1.0.0")).text();
+    expect(readme).not.toContain(`id="docsearch"`);
   });
 
   it("renders a by-module API reference with a per-module contents list and module-scoped anchors", async () => {

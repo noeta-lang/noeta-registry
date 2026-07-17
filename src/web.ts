@@ -30,6 +30,17 @@ const COPY_SCRIPT =
 /** SHA-256 of COPY_SCRIPT, as a CSP `script-src` hash source. */
 const COPY_SCRIPT_HASH = "sha256-pl2cEDUvXR5+2Hw51aFJiH4Vab1+eIJ+cbydXuLH4R8=";
 
+/**
+ * Progressive enhancement for the docs tab's search: filters the already-rendered declarations live
+ * as you type, so a search needs no page reload. Without it the `<form>` still submits `?q=` and the
+ * server filters — this only makes it instant. Emitted only on the docs tab, pinned by hash like
+ * COPY_SCRIPT. Edit → recompute the hash (the web.test.ts hash check fails until they match).
+ */
+const DOCSEARCH_SCRIPT =
+  `(function(){var i=document.getElementById("docsearch");var r=document.getElementById("docs-results");if(!i||!r)return;var c=document.getElementById("docsearch-count");var s=r.querySelector(".docsearch-summary");if(s)s.hidden=true;if(i.form)i.form.addEventListener("submit",function(e){e.preventDefault()});function run(){var q=i.value.trim().toLowerCase();r.classList.toggle("searching",q.length>0);var n=0;r.querySelectorAll(".module").forEach(function(m){var v=0;m.querySelectorAll(".decl").forEach(function(d){var hit=!q||(d.getAttribute("data-text")||"").indexOf(q)>=0;d.hidden=!hit;if(hit)v++});m.hidden=q.length>0&&v===0;n+=v});if(c)c.textContent=q?n+" match"+(n===1?"":"es"):""}i.addEventListener("input",run);run()})();`;
+/** SHA-256 of DOCSEARCH_SCRIPT, as a CSP `script-src` hash source. */
+const DOCSEARCH_SCRIPT_HASH = "sha256-SQJFu6r3AoXLtZBO+fqEnWeBG/t+1UiIifug/+Z1xM0=";
+
 /** The package page's sections. Each is its own URL: the CSP forbids scripts, so "tabs" are links. */
 const TABS = ["readme", "docs", "versions", "deps", "security"] as const;
 type Tab = (typeof TABS)[number];
@@ -74,12 +85,12 @@ interface Page {
 }
 
 /** Route a human (non-`/v1`) GET. Unknown shapes render the 404 page. */
-export async function handleWeb(env: Env, parts: string[]): Promise<Response> {
-  const page = await routeWeb(env, parts);
+export async function handleWeb(env: Env, parts: string[], params?: URLSearchParams): Promise<Response> {
+  const page = await routeWeb(env, parts, params);
   return html(page.body, page.status);
 }
 
-async function routeWeb(env: Env, parts: string[]): Promise<Page> {
+async function routeWeb(env: Env, parts: string[], params?: URLSearchParams): Promise<Page> {
   // `/`
   if (parts.length === 0) return { status: 200, body: await homePage(env) };
   // `/keywords/{keyword}` — every package tagged with it.
@@ -98,7 +109,9 @@ async function routeWeb(env: Env, parts: string[]): Promise<Page> {
     (version === undefined || SEMVER.test(version)) &&
     (sub === undefined || tab !== null)
   ) {
-    return packagePage(env, `${company}/${pkg}`, version, tab ?? "readme");
+    // Only the docs tab reads a query (`?q=` — its search); other tabs ignore it.
+    const query = tab === "docs" ? (params?.get("q") ?? "") : "";
+    return packagePage(env, `${company}/${pkg}`, version, tab ?? "readme", query);
   }
   return { status: 404, body: notFoundPage() };
 }
@@ -144,7 +157,13 @@ async function homePage(env: Env): Promise<string> {
  * metadata sidebar — around a different main column, so a reader never loses the release's identity
  * (or its install line) by navigating within it.
  */
-async function packagePage(env: Env, name: string, version?: string, tab: Tab = "readme"): Promise<Page> {
+async function packagePage(
+  env: Env,
+  name: string,
+  version?: string,
+  tab: Tab = "readme",
+  query = "",
+): Promise<Page> {
   const rows = await packageRows(env, name);
   if (rows.length === 0) {
     return { status: 404, body: notFoundPage(`No package \`${name}\` is published.`) };
@@ -188,7 +207,7 @@ async function packagePage(env: Env, name: string, version?: string, tab: Tab = 
       } catch {
         return { status: 500, body: notFoundPage("The stored documentation for this release is unreadable.") };
       }
-      main = docsMain(doc);
+      main = docsMain(doc, name, v, query);
       break;
     }
     case "versions":
@@ -220,6 +239,7 @@ async function packagePage(env: Env, name: string, version?: string, tab: Tab = 
          ${sidebar(name, selected, logIndex)}
        </div>`,
       "wide",
+      tab === "docs" ? DOCSEARCH_SCRIPT : "",
     ),
   };
 }
@@ -307,8 +327,38 @@ function repoLabel(url: string): string {
   return label.length > 34 ? `${label.slice(0, 33)}…` : label;
 }
 
-function docsMain(doc: DocsArtifact): string {
+/**
+ * The documentation tab. A search box filters the release's declarations. It works two ways from one
+ * markup: without JS the form submits `?q=` and the server renders only the matches below; with JS,
+ * DOCSEARCH_SCRIPT filters the already-rendered declarations live as you type (no reload). The
+ * `data-text` on each `.decl` is what the client filter reads.
+ */
+function docsMain(doc: DocsArtifact, name: string, version: string, query: string): string {
   const modules = Array.isArray(doc.modules) ? doc.modules : [];
+  if (modules.length === 0) return `<p class="muted">This release has no documented items.</p>`;
+
+  const q = query.trim().toLowerCase();
+  const action = `/${esc(name)}/${esc(version)}/docs`;
+  const form = `<form class="docsearch" method="get" action="${action}" role="search">
+    <input type="search" id="docsearch" name="q" value="${esc(query)}" placeholder="Search this package's API…"
+           aria-label="Search documentation" autocomplete="off" spellcheck="false">
+    <span class="docsearch-count" id="docsearch-count" aria-live="polite"></span>
+  </form>`;
+
+  // A search summary only when the query came from the server (no-JS path); JS updates the inline
+  // count instead. Sits inside the container so `.searching` styling covers it.
+  const hits = q
+    ? modules.reduce(
+        (n, m) => n + (Array.isArray(m.items) ? m.items.filter((i) => isDecl(i) && declText(i).includes(q)).length : 0),
+        0,
+      )
+    : 0;
+  const summary = q
+    ? `<p class="docsearch-summary">${hits} match${hits === 1 ? "" : "es"} for <code>${esc(
+        query,
+      )}</code> · <a href="${action}">clear</a></p>`
+    : "";
+
   const nav =
     modules.length > 1
       ? `<nav class="modnav"><strong>Modules</strong><ul>${modules
@@ -318,10 +368,8 @@ function docsMain(doc: DocsArtifact): string {
           })
           .join("")}</ul></nav>`
       : "";
-  const body = modules.length
-    ? modules.map(renderModule).join("\n")
-    : `<p class="muted">This release has no documented items.</p>`;
-  return `${nav}${body}`;
+  const body = modules.map((m) => renderModule(m, q)).join("\n");
+  return `${form}<div class="docs-results${q ? " searching" : ""}" id="docs-results">${summary}${nav}${body}</div>`;
 }
 
 function versionsMain(name: string, rows: Row[], selected: string): string {
@@ -388,13 +436,43 @@ function securityMain(advisories: AdvisoryRow[], version: string): string {
   return `${items}<p class="side-note">Advisory data is served signed at <code>/v1/advisories</code>; <code>noeta audit</code> is the authority for whether a build is affected.</p>`;
 }
 
-function renderModule(m: DocsModule): string {
+const isDecl = (i: DocsSection | DocsDecl): i is DocsDecl =>
+  typeof (i as DocsSection).section !== "string" && !!(i as DocsDecl).name && !!(i as DocsDecl).kind;
+
+/** The plain-text a declaration matches against — its kind, name, signature, and doc, lowercased. */
+function declText(d: DocsDecl): string {
+  return `${d.kind} ${d.name} ${d.signature ?? ""} ${d.doc ?? ""}`.toLowerCase();
+}
+
+/** One declaration as a `.decl` section, carrying `data-text` so the client filter can match it.
+ *  A `query` that this declaration misses adds the native `hidden` attribute — so a no-JS search
+ *  hides it too, while it stays in the DOM for the client filter to reveal again. */
+function renderDecl(modId: string, d: DocsDecl, query: string): string {
+  const hidden = query && !declText(d).includes(query) ? " hidden" : "";
+  // Anchor scoped by module: two modules may each expose a `new`, so a bare `decl-new` would
+  // collide across the by-module API reference.
+  return `<section class="decl" id="${modId}--${slug(d.name!)}" data-text="${esc(declText(d))}"${hidden}>
+    <h3><span class="kind">${esc(d.kind!)}</span> <code>${esc(d.name!)}</code></h3>
+    ${d.signature ? `<pre class="sig"><code>${esc(d.signature)}</code></pre>` : ""}
+    ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
+  </section>`;
+}
+
+/**
+ * A module's rendered block — always the *full* module (every `.decl` tagged with `data-text`), so
+ * the client filter has the whole set to work over. A `query` marks non-matching declarations, and
+ * an all-miss module, with the native `hidden` attribute: a no-JS search hides them server-side,
+ * and JS can reveal them again without a reload. The `.searching` container class (CSS) hides the
+ * jump-list and prose during a search.
+ */
+function renderModule(m: DocsModule, query = ""): string {
   const title = m.namespace || m.file || "module";
   const modId = slug(title);
   const items = Array.isArray(m.items) ? m.items : [];
-  const isDecl = (i: DocsSection | DocsDecl): i is DocsDecl =>
-    typeof (i as DocsSection).section !== "string" && !!(i as DocsDecl).name && !!(i as DocsDecl).kind;
   const decls = items.filter(isDecl);
+  const noMatch = query && !decls.some((d) => declText(d).includes(query));
+  const heading = `<h2>${esc(title)}${m.file && m.namespace ? ` <span class="muted mono">${esc(m.file)}</span>` : ""}</h2>`;
+
   // A per-module contents list (jump links) for modules with several declarations — the by-module
   // API reference (e.g. std.math's 26 functions) reads as one long flat list otherwise. CSS-only.
   const toc =
@@ -410,17 +488,11 @@ function renderModule(m: DocsModule): string {
       }
       const d = item as DocsDecl;
       if (!d.name || !d.kind) return "";
-      // Anchor scoped by module: two modules may each expose a `new`, so a bare `decl-new` would
-      // collide across the by-module API reference.
-      return `<section class="decl" id="${modId}--${slug(d.name)}">
-        <h3><span class="kind">${esc(d.kind)}</span> <code>${esc(d.name)}</code></h3>
-        ${d.signature ? `<pre class="sig"><code>${esc(d.signature)}</code></pre>` : ""}
-        ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
-      </section>`;
+      return renderDecl(modId, d, query);
     })
     .join("\n");
-  return `<section class="module" id="mod-${modId}">
-    <h2>${esc(title)}${m.file && m.namespace ? ` <span class="muted mono">${esc(m.file)}</span>` : ""}</h2>
+  return `<section class="module" id="mod-${modId}"${noMatch ? " hidden" : ""}>
+    ${heading}
     ${m.doc ? `<div class="prose">${md(m.doc)}</div>` : ""}
     ${toc}
     ${itemsHtml}
@@ -776,7 +848,7 @@ function html(body: string, status = 200): Response {
       // `data:` in img-src is for the `.field` grain texture (an inline SVG background) — without it
       // the atmospheric noise is silently blocked.
       "content-security-policy":
-        `default-src 'none'; script-src '${COPY_SCRIPT_HASH}'; ` +
+        `default-src 'none'; script-src '${COPY_SCRIPT_HASH}' '${DOCSEARCH_SCRIPT_HASH}'; ` +
         "style-src 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src https://fonts.gstatic.com; img-src https: data:",
     },
@@ -790,7 +862,7 @@ function html(body: string, status = 200): Response {
  * a blue human accent and a mint machine accent, the atmospheric `.field` backdrop, a paper light
  * mode that follows the browser preference, and the Inter / JetBrains Mono pair from Google Fonts.
  */
-function layout(title: string, body: string, variant: "" | "wide" = ""): string {
+function layout(title: string, body: string, variant: "" | "wide" = "", extraScript = ""): string {
   // `--page-max` drives the header, footer, AND page container together, so the chrome always spans
   // the same width as the content. A wide page (the tabbed package view + its sidebar) sets it on
   // <body>, which the header/footer wraps read too — otherwise they'd stay pinned to the narrow
@@ -927,6 +999,17 @@ table.versions tr.here{background:var(--accent-dim)}
 /* deps + nav */
 ul.deps,.modnav ul{list-style:none;padding:0}
 ul.deps li{padding:.3rem 0;border-bottom:1px solid var(--line)}
+/* docs search: an input-styled box; a live count sits to its right */
+.docsearch{display:flex;align-items:center;gap:.7rem;margin:0 0 1.4rem}
+.docsearch input{flex:1;min-width:0;padding:.55rem .8rem;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-1);color:var(--text-0);font-family:var(--font-mono);font-size:.85rem}
+.docsearch input:focus{outline:none;border-color:var(--accent)}
+.docsearch input::placeholder{color:var(--text-2)}
+.docsearch-count{font-family:var(--font-mono);font-size:.78rem;color:var(--text-2);white-space:nowrap}
+.docsearch-summary{font-size:.85rem;color:var(--text-1);margin:0 0 1.2rem}
+/* during a search — server-set "searching", or toggled by DOCSEARCH_SCRIPT — the browsing chrome
+   (module jump-list, prose, per-module contents) gives way to just the matching declarations */
+.docs-results.searching .modnav,.docs-results.searching .toc,.docs-results.searching .module>.prose{display:none}
+.docs-results.searching .decl{margin:0 0 1.1rem}
 .modnav{background:color-mix(in srgb,var(--surface-1) 75%,transparent);border:1px solid var(--line);border-radius:var(--radius);padding:.8rem 1.1rem;margin:1.2rem 0}
 .modnav strong{font-family:var(--font-mono);font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
 .modnav ul{margin:.5rem 0 0;display:flex;flex-wrap:wrap;gap:.3rem 1rem}
@@ -992,6 +1075,7 @@ ${body}
 </div>
 </footer>
 <script>${COPY_SCRIPT}</script>
+${extraScript ? `<script>${extraScript}</script>` : ""}
 </body>
 </html>`;
 }

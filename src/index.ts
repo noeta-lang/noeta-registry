@@ -112,7 +112,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return json({ error: "method not allowed" }, 405);
     }
-    return handleWeb(env, parts);
+    return handleWeb(env, parts, url.searchParams);
   }
 
   // POST /v1/scopes  (admin bootstrap)
