@@ -19,6 +19,17 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 /** Mirrors the publish-side KEYWORD in index.ts — the browse route validates before it queries. */
 const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
 
+/**
+ * The one script the page runs: copy-to-clipboard for the install snippets. It is inline and pinned
+ * in the CSP by the SHA-256 hash below, so only this exact byte sequence may execute — an injected
+ * `<script>` still can't. If you edit this string, recompute the hash (the test in web.test.ts
+ * fails until the two match).
+ */
+const COPY_SCRIPT =
+  `document.querySelectorAll(".copy-btn").forEach(function(b){b.addEventListener("click",function(){var c=b.parentElement.querySelector("code");if(!c||!navigator.clipboard)return;navigator.clipboard.writeText(c.textContent).then(function(){b.setAttribute("data-copied","");setTimeout(function(){b.removeAttribute("data-copied")},1200)})})});`;
+/** SHA-256 of COPY_SCRIPT, as a CSP `script-src` hash source. */
+const COPY_SCRIPT_HASH = "sha256-pl2cEDUvXR5+2Hw51aFJiH4Vab1+eIJ+cbydXuLH4R8=";
+
 /** The package page's sections. Each is its own URL: the CSP forbids scripts, so "tabs" are links. */
 const TABS = ["readme", "docs", "versions", "deps", "security"] as const;
 type Tab = (typeof TABS)[number];
@@ -271,9 +282,9 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
 
     <h3>Install</h3>
     <p class="side-note">Run this in your project directory:</p>
-    <pre><code>${esc(install)}</code></pre>
+    ${snippet(install)}
     <p class="side-note">Or add it to your <code>noeta.toml</code>:</p>
-    <pre><code>${esc(manifest)}</code></pre>
+    ${snippet(manifest)}
 
     <h3>Repository</h3>
     ${
@@ -282,6 +293,12 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
         : `<p class="mono muted">${esc(r.url)}</p>`
     }
   </aside>`;
+}
+
+/** A copyable code snippet: the escaped code plus a hover-revealed copy button that COPY_SCRIPT
+ *  wires up (it reads the sibling `<code>`). */
+function snippet(code: string): string {
+  return `<div class="snippet"><pre><code>${esc(code)}</code></pre><button class="copy-btn" type="button" aria-label="Copy to clipboard"></button></div>`;
 }
 
 /** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
@@ -750,12 +767,18 @@ function html(body: string, status = 200): Response {
     status,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      // The page renders only its own inline styles and no scripts — a strict CSP is cheap defense
-      // in depth over the escape-first renderer. The two Google Fonts hosts are the only concession,
-      // so the registry can wear the shared "Signal" typography without bundling font binaries.
+      // Strict CSP as defense in depth over the escape-first renderer. Scripts are still forbidden
+      // *except* one pinned by its SHA-256 hash — the copy-to-clipboard helper (COPY_SCRIPT). A hash
+      // source keeps the anti-XSS property intact: only that exact byte sequence runs, so a script a
+      // malicious README tried to inject still can't (its hash wouldn't match). The two Google Fonts
+      // hosts are the only other concession, so the registry can wear the shared "Signal" typography
+      // without bundling font binaries.
+      // `data:` in img-src is for the `.field` grain texture (an inline SVG background) — without it
+      // the atmospheric noise is silently blocked.
       "content-security-policy":
-        "default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; " +
-        "font-src https://fonts.gstatic.com; img-src https:",
+        `default-src 'none'; script-src '${COPY_SCRIPT_HASH}'; ` +
+        "style-src 'unsafe-inline' https://fonts.googleapis.com; " +
+        "font-src https://fonts.gstatic.com; img-src https: data:",
     },
   });
 }
@@ -768,6 +791,10 @@ function html(body: string, status = 200): Response {
  * mode that follows the browser preference, and the Inter / JetBrains Mono pair from Google Fonts.
  */
 function layout(title: string, body: string, variant: "" | "wide" = ""): string {
+  // `--page-max` drives the header, footer, AND page container together, so the chrome always spans
+  // the same width as the content. A wide page (the tabbed package view + its sidebar) sets it on
+  // <body>, which the header/footer wraps read too — otherwise they'd stay pinned to the narrow
+  // default and sit inset from the body.
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -787,7 +814,7 @@ function layout(title: string, body: string, variant: "" | "wide" = ""): string 
 --line:rgba(233,237,243,.08);--line-strong:rgba(233,237,243,.14);
 --font-body:"Inter","Segoe UI",system-ui,sans-serif;
 --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
---max:60rem;--radius:12px;color-scheme:dark;
+--max:60rem;--page-max:60rem;--radius:12px;color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:border-box}
 html{scroll-behavior:smooth}
@@ -798,7 +825,9 @@ a{color:inherit;text-decoration:none}
 .field{position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(58rem 40rem at 84% -12%,rgba(79,143,247,.1),transparent 60%),radial-gradient(52rem 40rem at -6% 108%,rgba(79,224,168,.055),transparent 58%),var(--bg)}
 .field::after{content:"";position:absolute;inset:0;opacity:.02;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E")}
 /* header */
-.wrap{max-width:var(--max);margin-inline:auto;padding-inline:clamp(1.25rem,4vw,2.5rem)}
+.wrap{max-width:var(--page-max);margin-inline:auto;padding-inline:clamp(1.25rem,4vw,2.5rem)}
+/* a wide page widens its chrome too, so the header/footer never sit inset from the body */
+body.wide{--page-max:76rem}
 .site-head{position:sticky;top:0;z-index:10;backdrop-filter:blur(16px);background:color-mix(in srgb,var(--bg) 72%,transparent);border-bottom:1px solid var(--line)}
 .site-head .wrap{display:flex;align-items:center;justify-content:space-between;height:3.75rem}
 .wordmark{font-family:var(--font-body);font-size:1.2rem;font-weight:620;letter-spacing:-.02em;color:var(--text-0)}
@@ -807,7 +836,7 @@ a{color:inherit;text-decoration:none}
 .site-nav a{color:var(--text-1);transition:color 160ms ease}.site-nav a:hover{color:var(--accent-bright)}
 @media (max-width:38rem){.site-head .wrap{height:auto;flex-wrap:wrap;gap:.1rem 1rem;padding-block:.7rem}}
 /* main */
-.page{max-width:var(--max);margin-inline:auto;padding:clamp(2rem,5vh,3.25rem) clamp(1.25rem,4vw,2.5rem) 5rem}
+.page{max-width:var(--page-max);margin-inline:auto;padding:clamp(2rem,5vh,3.25rem) clamp(1.25rem,4vw,2.5rem) 5rem}
 .eyebrow{display:inline-flex;align-items:center;gap:.55rem;font-family:var(--font-mono);font-size:.75rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);font-weight:500;margin-bottom:.5rem}
 .eyebrow::before{content:"";width:1.4rem;height:1px;background:currentColor;opacity:.6}
 h1{font-family:var(--font-body);font-weight:640;font-size:clamp(2.1rem,5vw,3rem);line-height:1.08;letter-spacing:-.03em;margin:.1rem 0 .6rem}
@@ -834,7 +863,6 @@ h3{font-family:var(--font-body);font-weight:600;font-size:1.08rem;letter-spacing
 .page a.button:hover{text-decoration:none}
 /* package shell: tab bar + metadata rail. Tabs are links (the CSP forbids scripts), so each
    section is its own URL and stays linkable/back-navigable. */
-.page.wide{max-width:76rem}
 .badges{margin:.2rem 0 .7rem}
 /* keyword chips — the machine accent, since they are index terms rather than prose */
 ul.keywords{list-style:none;padding:0;margin:0 0 1.15rem;display:flex;flex-wrap:wrap;gap:.35rem .45rem}
@@ -864,6 +892,16 @@ ul.keywords li{padding:0}
    one-line TOML table scrolls. */
 .pkg-side pre{padding:.55rem .7rem;white-space:pre;overflow-x:auto}
 .pkg-side pre code{font-size:.75rem;line-height:1.55}
+/* copy button — revealed on hover/focus, wired up by COPY_SCRIPT */
+.snippet{position:relative}
+.snippet pre{margin:0}
+.copy-btn{position:absolute;top:.4rem;right:.4rem;padding:.16rem .5rem;border:1px solid var(--line-strong);border-radius:6px;background:color-mix(in srgb,var(--surface-2) 90%,transparent);color:var(--text-1);font-family:var(--font-mono);font-size:.66rem;letter-spacing:.02em;cursor:pointer;opacity:0;transition:opacity 140ms ease,color 140ms ease,border-color 140ms ease}
+.copy-btn::after{content:"Copy"}
+.snippet:hover .copy-btn,.copy-btn:focus-visible{opacity:1}
+.copy-btn:hover{color:var(--text-0);border-color:var(--accent)}
+.copy-btn[data-copied]{opacity:1;color:var(--accent-2-bright);border-color:color-mix(in srgb,var(--accent-2) 45%,var(--line-strong))}
+.copy-btn[data-copied]::after{content:"Copied"}
+@media (prefers-reduced-motion:reduce){.copy-btn{transition:none}}
 .side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
 @media (max-width:52rem){.pkg-grid{grid-template-columns:1fr}.pkg-side{position:static;order:-1}}
 /* advisories */
@@ -925,7 +963,7 @@ pre.sig code{color:var(--text-0)}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.button{transition:none}}
 </style>
 </head>
-<body>
+<body${variant ? ` class="${variant}"` : ""}>
 <div class="field" aria-hidden="true"></div>
 <header class="site-head">
 <div class="wrap">
@@ -953,6 +991,7 @@ ${body}
 <p class="foot-meta">Noeta is pre-alpha and built in the open — anything may change without notice.</p>
 </div>
 </footer>
+<script>${COPY_SCRIPT}</script>
 </body>
 </html>`;
 }

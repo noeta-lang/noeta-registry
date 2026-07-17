@@ -116,6 +116,22 @@ describe("registry web UI", () => {
     expect(body).toContain(`<span class="badge license">MIT OR Apache-2.0</span>`);
   });
 
+  it("pins the copy-to-clipboard script in the CSP by its real hash", async () => {
+    // The one allowed script is inline and pinned by SHA-256 — the anti-XSS property only holds if
+    // the hash in the CSP is the hash of the script actually served. Extract both from the page and
+    // recompute, so editing the script without updating the hash (or vice versa) fails here.
+    const body = await (await web("/acme/greeter")).text();
+    const script = body.match(/<script>([\s\S]*?)<\/script>/);
+    expect(script, "the page serves exactly one inline script").not.toBeNull();
+    const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(script![1]));
+    const digest = "sha256-" + btoa(String.fromCharCode(...new Uint8Array(hash)));
+    const csp = (await web("/acme/greeter")).headers.get("content-security-policy") ?? "";
+    // A hash source, never a blanket allowance: `script-src '<hash>'` and nothing looser.
+    expect(csp).toContain(`script-src '${digest}'`);
+    const scriptSrc = csp.match(/script-src ([^;]*)/)?.[1] ?? "";
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+  });
+
   it("shows the latest release with its metadata rail and a repository link", async () => {
     const body = await (await web("/acme/greeter")).text();
     // Latest by semver (1.1.0 > 1.0.0 — not lexicographic).
