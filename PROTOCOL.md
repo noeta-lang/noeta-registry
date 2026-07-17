@@ -119,10 +119,10 @@ keyword is discovery metadata: tampering with one mis-files a package in a listi
 redirect a build or misrepresent a legal claim. Binding it would grow the leaf's record format, and
 every client's parse of it, for no security gain.
 
-> **Not yet pinned by the golden fixtures.** The Worker accepts and serves `keywords` today, but
-> `noeta-pm` does not send them yet (that needs `[package] keywords` in `noeta.toml`), so no fixture
-> pins the shape. Being optional and omitted-when-absent, it is backward compatible in both
-> directions. When the client lands, add `keywords` to the fixtures per the sync rule above.
+Declared in the manifest as `[package] keywords` and sent on publish by `noeta-pm`; the shape is
+pinned by the golden fixtures (`publish-request-signed.json`, `versions-response.json`) in both
+repos. Optional and omitted-when-absent, so a client or registry that predates the field stays
+compatible in both directions.
 
 **Reserved for the browser.** `keywords` cannot be registered or claimed as a scope: packages live
 at the web browser's root (`/{company}/{package}`), so a `keywords` scope would be shadowed by
