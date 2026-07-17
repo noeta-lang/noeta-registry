@@ -1,5 +1,21 @@
 import { defineWorkersConfig, readD1Migrations } from "@cloudflare/vitest-pool-workers/config";
+import fs from "node:fs";
 import path from "node:path";
+
+// The golden wire fixtures (test/fixtures/wire) — a VERBATIM copy of the canonical set in the
+// language repo (crates/noeta-pm/test_data/wire; see the fixtures' README for the sync rule).
+// Read at config time (workerd has no fs) and bound as raw text, name → bytes, so the tests can
+// both parse them and hash them against MANIFEST.sha256.
+function readWireFixtures(): Record<string, string> {
+  const dir = path.join(__dirname, "test", "fixtures", "wire");
+  const out: Record<string, string> = {};
+  for (const name of fs.readdirSync(dir)) {
+    if (name.endsWith(".json") || name === "MANIFEST.sha256") {
+      out[name] = fs.readFileSync(path.join(dir, name), "utf8");
+    }
+  }
+  return out;
+}
 
 // Run the Worker inside Miniflare with a real local D1, migrations applied per-suite.
 export default defineWorkersConfig(async () => {
@@ -14,6 +30,7 @@ export default defineWorkersConfig(async () => {
           miniflare: {
             bindings: {
               TEST_MIGRATIONS: migrations,
+              WIRE_FIXTURES: readWireFixtures(),
               ADMIN_TOKEN: "test-admin-token",
               // Self-service claim OIDC config — a hermetic test issuer whose JWKS the claim tests
               // serve via fetchMock (namespace-protection #1).
