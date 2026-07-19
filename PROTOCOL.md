@@ -387,7 +387,8 @@ dropped/rolled-back feed. Reads are unauthenticated.
       "tier": "operator",                    // "operator" | "publisher" | "imported" (intake tier)
       "bundle": "<json string>",             // publisher tier only: the owner's keyless attestation
       "upstream_id": "GHSA-…",               // imported tier only: the upstream advisory id
-      "upstream_url": "<link>" }             // imported tier only: a link to the upstream advisory
+      "upstream_url": "<link>",              // imported tier only: a link to the upstream advisory
+      "cvss": "CVSS:3.1/AV:N/…" }            // imported tier: the CVSS vector the band was derived from
   ]
 }
 ```
@@ -399,7 +400,14 @@ withdrawn state so an advisory can't be silently un-retracted under the same sig
 `tier` (appended after the original eight fields — the record-evolution append rule) so a client can
 trust *which* intake tier the registry served. `bundle`/`upstream_id`/`upstream_url` are echoed but
 **not** in the signed bytes: the bundle is self-attesting (the consumer verifies it offline), and the
-upstream links are provenance metadata.
+upstream links are provenance metadata, as is `cvss` (see below).
+
+**CVSS-vector severity.** When an imported upstream record carries a CVSS v3.x vector (OSV `severity[]`
+entries of type `CVSS_V3`, or GHSA's `cvss.vectorString`), the import computes the base score honestly —
+the published CVSS v3.1 base-metric equations — and derives the canonical `severity` band from it,
+storing the vector in `cvss`. `cvss` is echoed but **not** signed (like `bundle`/`upstream_*`): the
+signed decision is the `severity` band; the vector lets a client re-derive and display the score. A text
+severity (`database_specific.severity`) remains the fallback when no vector is present.
 
 **Intake tiers (advisory-intake arc).** Every advisory records how it entered the feed — the arc's
 rule is *automate provenance, never judgment*:
@@ -461,7 +469,24 @@ OIDC identity can produce a bundle over these bytes.
 ### Imported feeds (OSV / GHSA / RUSTSEC) — advisory-intake tier 3
 
 An external ecosystem names packages in its own namespace; a **name mapping** binds one to a Noeta
-package identity. Mappings are operator-curated data — a human judgment, never inferred.
+package identity. Mappings are operator-curated data — a human judgment, never inferred. The scheduled
+cron pulls the configured upstream sources, applies the mappings, and imports only mapped packages.
+
+**Source adapters (the scheduled cron).** Each source is env-gated — an unconfigured source is a no-op —
+and queried against the operator-curated name map, so only mapped packages ever import. Records are
+de-duplicated by upstream id across sources, and the import is idempotent per upstream id.
+
+| Source | Env | How it is pulled |
+|---|---|---|
+| **OSV** (api.osv.dev) | `OSV_API` (`off` to disable; on by default), `OSV_API_URL` to override the endpoint | `POST /v1/query` per mapped package (full OSV records; `page_token` pagination) |
+| **GHSA** (GitHub GraphQL) | `GITHUB_TOKEN` (absent → skip), `GITHUB_GRAPHQL_URL` to override | `securityVulnerabilities(ecosystem, package)` per mapped package, paginated; the advisory's `cvss.vectorString` feeds the severity band |
+| **RUSTSEC** | `RUSTSEC_IMPORT_URL` (absent → skip) | its published OSV feed, streamed with `next_page_token` / `next` pagination |
+| **Manual override** | `OSV_IMPORT_URL` | a single pre-assembled OSV array/`{advisories}` (backfills, testing) |
+
+OSV and GHSA are queried **per mapped package** rather than swept whole: the mapped set is small and
+human-curated, so bounding queries to it keeps the cron's Cloudflare-Workers subrequest use proportional
+to the curated set (not to the millions of upstream records), and matches the "only mapped packages
+import" principle. Each per-query paginator is capped (a backstop against an unbounded upstream).
 
 #### `POST /v1/name-mappings` *(admin)* / `GET /v1/name-mappings`
 
@@ -481,9 +506,10 @@ Body: { "advisories": [ <OSV record>, … ] }
 Each OSV record's `affected[].package` `(ecosystem, name)` is looked up in the name map; a record with
 no mapping is **skipped** (never guessed). A mapped record becomes a `tier: "imported"` advisory whose
 `id` is the upstream id (so re-import is idempotent), carrying `upstream_id`/`upstream_url`. The
-affected `ranges` are derived from the OSV SEMVER events, the severity from GHSA's
-`database_specific.severity` (defaulting to `medium`). A **scheduled cron** (`OSV_IMPORT_URL`, daily)
-runs the same import automatically.
+affected `ranges` are derived from the OSV SEMVER events, and the severity from the CVSS vector (an OSV
+`CVSS_V3` `severity[]` entry) when present, else GHSA's `database_specific.severity` (defaulting to
+`medium`). The **scheduled cron** runs the same import automatically over the configured source adapters
+above.
 
 ### Public report queue — advisory-intake tier 4 (intake only)
 
@@ -506,6 +532,17 @@ The reporter's IP is hashed for rate-limiting only — never stored raw, never s
 
 The triage queue. Admin sees everything; a scope owner sees only their own scope's reports
 (owner-authenticated). `ip_hash` is never included.
+
+#### `GET /v1/reports/{id}` *(operator or scope owner)* — one report by id
+
+```
+200 OK  { "report": { "id", "package", "ranges", "summary", "details", "url", "reporter", "status", "advisory_id", "created_at" } }
+404 Not Found  no such report
+```
+
+One report by id, authorized as the operator (admin token) or the scope owner of the report's own
+package (scope token) — the same two identities that may promote it. `ip_hash` is never included.
+`noeta advisory promote` fetches this to **prefill** the advisory from the report.
 
 #### `POST /v1/reports/{id}/promote` — turn a report into an advisory
 

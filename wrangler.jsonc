@@ -24,13 +24,18 @@
     "OIDC_ISSUER": "https://token.actions.githubusercontent.com",
     "OIDC_JWKS_URL": "https://token.actions.githubusercontent.com/.well-known/jwks",
     "OIDC_AUDIENCE": "noeta-registry"
-    // Advisory-intake arc: set OSV_IMPORT_URL (an OSV-format JSON feed) to enable the scheduled import
-    // (tier 3); the cron below then pulls it. REPORT_RATE_LIMIT overrides the per-IP report cap
-    // (tier 4, default 5/hour). Both are plain vars — add them here to turn the features on.
+    // Advisory-intake arc: the scheduled cron (below) pulls per-source upstream adapters and imports
+    // mapped packages (residual c). Each source is env-gated:
+    //   • OSV (api.osv.dev): on by default; set OSV_API="off" to disable, OSV_API_URL to override.
+    //   • GHSA (GitHub GraphQL): set GITHUB_TOKEN (a secret) to enable; GITHUB_GRAPHQL_URL to override.
+    //   • RUSTSEC: set RUSTSEC_IMPORT_URL to its published OSV feed to enable.
+    //   • OSV_IMPORT_URL: a single pre-assembled OSV feed — the manual/testing override, still supported.
+    // REPORT_RATE_LIMIT overrides the per-IP report cap (tier 4, default 5/hour). Plain vars go here;
+    // tokens (GITHUB_TOKEN) are secrets — `wrangler secret put GITHUB_TOKEN`.
   },
-  // Scheduled advisory import (advisory-intake arc, tier 3): pull OSV_IMPORT_URL daily and import mapped
-  // advisories through the operator-curated name map. Idempotent per upstream id; a no-op when
-  // OSV_IMPORT_URL is unset.
+  // Scheduled advisory import (advisory-intake arc, tier 3): pull the configured source adapters daily
+  // and import mapped advisories through the operator-curated name map. Idempotent per upstream id; a
+  // no-op when no source is configured.
   "triggers": {
     "crons": ["0 6 * * *"]
   }

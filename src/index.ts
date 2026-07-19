@@ -49,6 +49,14 @@ export interface Env {
   // external advisories through the operator-curated name map (tier 3); absent → the cron is a no-op.
   REPORT_RATE_LIMIT?: string;
   OSV_IMPORT_URL?: string;
+  // Per-source advisory-import adapters (advisory-intake residual c; see sources.ts). Each is gated —
+  // an unset source is a no-op. OSV (api.osv.dev) is on by default; GHSA needs GITHUB_TOKEN; RUSTSEC
+  // needs its feed URL. The `*_URL` overrides point tests at mocked endpoints.
+  OSV_API?: string;
+  OSV_API_URL?: string;
+  GITHUB_TOKEN?: string;
+  GITHUB_GRAPHQL_URL?: string;
+  RUSTSEC_IMPORT_URL?: string;
 }
 
 interface VersionRow {
@@ -217,6 +225,10 @@ async function route(request: Request, env: Env): Promise<Response> {
         return json({ error: "admin token required" }, 401);
       }
       return reports.listReports(env, url.searchParams.get("status"), url.searchParams.get("package"));
+    }
+    // GET /v1/reports/{id}  — one report by id, for a promoter to prefill (operator or scope owner)
+    if (parts.length === 3 && request.method === "GET") {
+      return reports.getReport(request, env, parts[2], authorizeScope);
     }
     // POST /v1/reports/{id}/promote  — promote a report into an advisory (operator or scope owner)
     if (parts.length === 4 && parts[3] === "promote" && request.method === "POST") {

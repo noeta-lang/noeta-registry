@@ -209,6 +209,21 @@ describe("public report queue (tier 4)", () => {
     expect(mine.reports.some((r: any) => r.package === "other/thing")).toBe(false);
   });
 
+  it("serves one report by id to the operator and the scope owner, but not to strangers", async () => {
+    const filed = (await (await post("/reports", REPORT, undefined, { "CF-Connecting-IP": "203.0.113.7" })).json()) as any;
+    // Operator (admin) can read it.
+    const asAdmin = await getJson(`/reports/${filed.id}`, ADMIN);
+    expect(asAdmin.report.id).toBe(filed.id);
+    expect(asAdmin.report.package).toBe("acme/imgfx");
+    expect(asAdmin.report.ip_hash).toBeUndefined();
+    // The scope owner of the report's package can read it (scope publish token).
+    const asOwner = await getJson(`/reports/${filed.id}`, ACME_TOKEN);
+    expect(asOwner.report.id).toBe(filed.id);
+    // A wrong token is refused; an unknown id is 404.
+    expect((await get(`/reports/${filed.id}`, "wrong")).status).toBe(403);
+    expect((await get(`/reports/does-not-exist`, ADMIN)).status).toBe(404);
+  });
+
   it("dismisses a report (admin) without issuing an advisory", async () => {
     const filed = (await (await post("/reports", REPORT, undefined, { "CF-Connecting-IP": "203.0.113.6" })).json()) as any;
     expect((await post(`/reports/${filed.id}/dismiss`, {}, ADMIN)).status).toBe(200);
