@@ -383,15 +383,35 @@ dropped/rolled-back feed. Reads are unauthenticated.
       "withdrawn": false,                    // a retracted advisory is kept, never deleted
       "seq": 0,                              // monotonic feed cursor (drives ?since delta sync)
       "signature": "<128-hex>",              // Ed25519 over the canonical bytes
-      "log_index": 7 }                       // its transparency-log leaf; omitted if unlogged
+      "log_index": 7,                        // its transparency-log leaf; omitted if unlogged
+      "tier": "operator",                    // "operator" | "publisher" | "imported" (intake tier)
+      "bundle": "<json string>",             // publisher tier only: the owner's keyless attestation
+      "upstream_id": "GHSA-…",               // imported tier only: the upstream advisory id
+      "upstream_url": "<link>" }             // imported tier only: a link to the upstream advisory
   ]
 }
 ```
 
 The canonical bytes an advisory is signed over (and logged as) are
-`noeta-advisory-v1\n{id}\n{package}\n{ranges}\n{severity}\n{active|withdrawn}\n{summary}\n{sha256(details)}\n{url}\n`
+`noeta-advisory-v1\n{id}\n{package}\n{ranges}\n{severity}\n{active|withdrawn}\n{summary}\n{sha256(details)}\n{url}\n{tier}\n`
 — reproduced identically by the client (`noeta-pm`'s `advisory::canonical_bytes`), binding the
-withdrawn state so an advisory can't be silently un-retracted under the same signature.
+withdrawn state so an advisory can't be silently un-retracted under the same signature, and the
+`tier` (appended after the original eight fields — the record-evolution append rule) so a client can
+trust *which* intake tier the registry served. `bundle`/`upstream_id`/`upstream_url` are echoed but
+**not** in the signed bytes: the bundle is self-attesting (the consumer verifies it offline), and the
+upstream links are provenance metadata.
+
+**Intake tiers (advisory-intake arc).** Every advisory records how it entered the feed — the arc's
+rule is *automate provenance, never judgment*:
+- `operator` — operator-curated, admin-issued (`POST /v1/advisories`; the anchor tier, the default).
+- `publisher` — issued by a scope's own owner for a package in their own scope
+  (`POST /v1/scopes/{scope}/advisories`), carrying a keyless Sigstore `bundle` the consumer verifies
+  offline against the scope's pinned identity.
+- `imported` — mirrored from an external ecosystem (OSV/GHSA/RUSTSEC) via the operator-curated name map
+  (`POST /v1/advisories/import` + the scheduled cron), carrying the upstream id + link.
+
+A **public report** (`POST /v1/reports`) is never an advisory: it is unauthenticated intake, invisible
+in the feed, and only becomes an advisory when an operator or scope owner **promotes** it.
 
 ### `GET /v1/advisories/checkpoint` — the signed feed head
 
@@ -404,13 +424,103 @@ regresses, or a digest that doesn't match the served feed, means an advisory was
 
 `200 OK { "public_key": "<64-hex Ed25519>" }` (or `404` if unset). What a client pins.
 
-### `POST /v1/advisories` *(admin)* — publish or update an advisory
+### `POST /v1/advisories` *(admin)* — publish or update an **operator** advisory
 
 `Authorization: Bearer <ADMIN_TOKEN>`. Body: the advisory fields above minus `seq`/`signature`/
 `log_index`/`withdrawn` defaults (`withdrawn` optional, default `false`; `details`/`url` optional,
 default `""`; `patched` optional). Idempotent per `id` — re-posting updates the advisory (e.g. to
 withdraw or re-scope), bumps `seq`, re-signs, and appends the new state to the transparency log.
-Responds `201 { "status": "advisory published", "id": "…", "seq": 0, "log_index": 7 }`. `501` when
-no advisory signing key is configured.
+Responds `201 { "status": "advisory published", "id": "…", "tier": "operator", "seq": 0, "log_index": 7 }`.
+`501` when no advisory signing key is configured.
 
 Configure via `ADVISORY_PRIVATE_KEY` (base64 PKCS8, a Worker secret) / `ADVISORY_PUBLIC_KEY` (hex).
+
+### `POST /v1/scopes/{scope}/advisories` — a **publisher** advisory (scope owner)
+
+A scope's own owner issues an advisory for a package in their own scope (advisory-intake arc, tier 2).
+Authenticated exactly like publish: `Authorization: Bearer <token>` owning `{scope}`. Body: the same
+advisory fields **plus** a required `bundle` — a keyless Sigstore bundle (JSON string) attesting the
+advisory under the owner's OIDC identity, stored verbatim and verified **offline by the consumer**
+(the registry is never the trust boundary for it, exactly like a release bundle).
+
+```
+Body: { "id": "ACME-2026-0001", "package": "acme/imgfx", "ranges": ">=1.0.0, <1.2.0",
+        "severity": "high", "summary": "…", "details": "…", "url": "…", "patched": "1.2.0",
+        "bundle": "<keyless Sigstore bundle JSON>" }
+
+201 Created   { "status": "advisory published", "id": "…", "tier": "publisher", "seq": 3, "log_index": 9 }
+403 Forbidden  the token doesn't own {scope}, or `package` is not under {scope}
+400 Bad Request  malformed body, or a missing/invalid `bundle`
+501            no advisory signing key configured
+```
+
+The advisory is marked `tier: "publisher"`, re-signed with the feed key, and transparency-logged like
+any other. The `bundle` is what makes it publicly attributable and un-forgeable: only the scope owner's
+OIDC identity can produce a bundle over these bytes.
+
+### Imported feeds (OSV / GHSA / RUSTSEC) — advisory-intake tier 3
+
+An external ecosystem names packages in its own namespace; a **name mapping** binds one to a Noeta
+package identity. Mappings are operator-curated data — a human judgment, never inferred.
+
+#### `POST /v1/name-mappings` *(admin)* / `GET /v1/name-mappings`
+
+```
+POST Body: { "ecosystem": "crates.io", "external_name": "imgfx-rs", "noeta_package": "acme/imgfx" }
+201 Created  { "status": "mapping registered", … }   // idempotent per (ecosystem, external_name)
+GET 200 OK   { "mappings": [ { "ecosystem", "external_name", "noeta_package" }, … ] }   // public
+```
+
+#### `POST /v1/advisories/import` *(admin)* — import a batch of OSV records
+
+```
+Body: { "advisories": [ <OSV record>, … ] }
+200 OK  { "status": "import complete", "imported": 3, "skipped": 1 }
+```
+
+Each OSV record's `affected[].package` `(ecosystem, name)` is looked up in the name map; a record with
+no mapping is **skipped** (never guessed). A mapped record becomes a `tier: "imported"` advisory whose
+`id` is the upstream id (so re-import is idempotent), carrying `upstream_id`/`upstream_url`. The
+affected `ranges` are derived from the OSV SEMVER events, the severity from GHSA's
+`database_specific.severity` (defaulting to `medium`). A **scheduled cron** (`OSV_IMPORT_URL`, daily)
+runs the same import automatically.
+
+### Public report queue — advisory-intake tier 4 (intake only)
+
+Anyone may *file* a report; a report is never an advisory and never appears in the signed feed. It
+becomes an advisory only via an explicit **promote** (operator or the package's scope owner).
+
+#### `POST /v1/reports` — file a report (unauthenticated, rate-limited)
+
+```
+Body: { "package": "acme/imgfx", "summary": "<one line>",
+        "ranges": "…", "details": "…", "url": "…", "reporter": "…" }   // all but package+summary optional
+201 Created  { "status": "report filed", "id": "<opaque>", "note": "…" }
+429 Too Many Requests   the reporter's IP exceeded REPORT_RATE_LIMIT (default 5/hour)
+400 Bad Request         malformed body
+```
+
+The reporter's IP is hashed for rate-limiting only — never stored raw, never served.
+
+#### `GET /v1/reports[?status=&package=]` *(admin)* / `GET /v1/scopes/{scope}/reports` *(scope owner)*
+
+The triage queue. Admin sees everything; a scope owner sees only their own scope's reports
+(owner-authenticated). `ip_hash` is never included.
+
+#### `POST /v1/reports/{id}/promote` — turn a report into an advisory
+
+Authenticated as an **operator** (admin token → an `operator` advisory) or the **scope owner** of the
+report's package (scope token → a `publisher` advisory, which must carry a `bundle`). Body: the
+*triaged* advisory fields (the promoter supplies the real id/range/severity/summary; `package` must
+match the report's). Marks the report `promoted` and records the advisory id.
+
+```
+201 Created  { "status": "report promoted", "report": "<id>", "advisory": "…", "tier": "operator", … }
+409 Conflict  the report is already promoted/dismissed
+404 Not Found  no such report
+```
+
+#### `POST /v1/reports/{id}/dismiss` *(admin)* — close a report without an advisory
+
+`200 OK { "status": "report dismissed", "id": "…" }` (a false alarm or duplicate; the report is kept,
+never deleted). `409` if already promoted/dismissed.
