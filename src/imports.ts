@@ -12,13 +12,41 @@
 // place rather than duplicating.
 
 import { upsertAdvisory, AdvisoryEnv } from "./advisory";
+import { scoreVector } from "./cvss";
 
 export interface ImportEnv extends AdvisoryEnv {
   DB: D1Database;
   ADMIN_TOKEN?: string;
-  // The OSV-format feed the scheduled cron pulls (a JSON array of OSV records). Absent → the cron is a
-  // no-op and only the manual admin import path runs.
+  // Per-source upstream adapters (advisory-intake residual c; see sources.ts). Each is independently
+  // gated — an unset source is a no-op, never an error — so an operator turns on exactly the feeds they
+  // want. All are queried against the operator-curated name map; only mapped packages ever import.
+  //   • OSV (api.osv.dev): on by default; `OSV_API=off` disables. `OSV_API_URL` overrides the endpoint.
+  //   • GHSA (GitHub GraphQL): needs `GITHUB_TOKEN` (absent → skip). `GITHUB_GRAPHQL_URL` overrides.
+  //   • RUSTSEC: its published OSV feed at `RUSTSEC_IMPORT_URL` (absent → skip).
+  OSV_API?: string;
+  OSV_API_URL?: string;
+  GITHUB_TOKEN?: string;
+  GITHUB_GRAPHQL_URL?: string;
+  RUSTSEC_IMPORT_URL?: string;
+  // A single pre-assembled OSV feed (a JSON array of OSV records) — the manual/testing override, kept
+  // working alongside the per-source adapters for backfills and one-off imports.
   OSV_IMPORT_URL?: string;
+}
+
+/** One operator-curated name mapping (external ecosystem package → Noeta package). The source adapters
+ *  read these to query only the mapped set. */
+export interface NameMapping {
+  ecosystem: string;
+  external_name: string;
+  noeta_package: string;
+}
+
+/** The operator-curated name map — the exact set of upstream packages the adapters query for. */
+export async function fetchMappings(env: ImportEnv): Promise<NameMapping[]> {
+  return (
+    (await env.DB.prepare("SELECT ecosystem, external_name, noeta_package FROM name_mappings").all<NameMapping>())
+      .results ?? []
+  );
 }
 
 const SEVERITIES = new Set(["low", "medium", "high", "critical"]);
@@ -37,12 +65,18 @@ interface OsvAffected {
   package?: { ecosystem?: string; name?: string };
   ranges?: OsvRange[];
 }
-interface OsvRecord {
+/** An OSV `severity[]` entry: a scoring `type` (we honour `CVSS_V3`) and a `score` field which — for a
+ *  CVSS entry — holds the vector *string* (the OSV schema's confusing name for it). */
+interface OsvSeverity {
+  type?: string;
+  score?: string;
+}
+export interface OsvRecord {
   id?: string;
   summary?: string;
   details?: string;
   withdrawn?: string;
-  severity?: unknown;
+  severity?: OsvSeverity[] | string | unknown;
   database_specific?: { severity?: string };
   affected?: OsvAffected[];
   references?: { url?: string }[];
@@ -147,7 +181,7 @@ export async function importRecords(
       skipped++;
       continue;
     }
-    const severity = severityOf(rec);
+    const { severity, cvss } = severityOf(rec);
     const summary = (rec.summary ?? rec.details ?? upstreamId).split(/[\n\r]/)[0].slice(0, 200) || upstreamId;
     const details = typeof rec.details === "string" ? rec.details : "";
     const url = referenceUrl(rec, upstreamId);
@@ -171,6 +205,7 @@ export async function importRecords(
         bundle: null,
         upstream_id: upstreamId,
         upstream_url: url,
+        cvss,
       });
       imported++;
     }
@@ -178,20 +213,15 @@ export async function importRecords(
   return { imported, skipped };
 }
 
-/** The scheduled-cron entry: pull the configured OSV feed and import it. A no-op when `OSV_IMPORT_URL`
- *  is unset. Errors are surfaced to the caller (the cron handler logs them). */
+/** The scheduled-cron entry (advisory-intake residual c): pull every configured upstream source (OSV,
+ *  GHSA, RUSTSEC, and the manual `OSV_IMPORT_URL` override) via the per-ecosystem adapters, then import
+ *  the combined, de-duplicated records through the name map. A no-op when no source is configured.
+ *  Idempotent per upstream id, so a repeated run refreshes rather than duplicating. */
 export async function runScheduledImport(env: ImportEnv): Promise<{ imported: number; skipped: number }> {
-  if (!env.OSV_IMPORT_URL) return { imported: 0, skipped: 0 };
-  const resp = await fetch(env.OSV_IMPORT_URL, { headers: { accept: "application/json" } });
-  if (!resp.ok) throw new Error(`OSV feed ${env.OSV_IMPORT_URL} returned ${resp.status}`);
-  const payload = (await resp.json()) as unknown;
-  // Accept either a bare array of records or `{ advisories: [...] }`.
-  const records = Array.isArray(payload)
-    ? payload
-    : Array.isArray((payload as Record<string, unknown>)?.advisories)
-      ? ((payload as Record<string, unknown>).advisories as unknown[])
-      : [];
-  return importRecords(env, records as OsvRecord[]);
+  // Imported lazily to avoid a cycle (sources.ts imports the shared types from here).
+  const { collectFromSources } = await import("./sources");
+  const records = await collectFromSources(env);
+  return importRecords(env, records);
 }
 
 // --- OSV field extraction -------------------------------------------------------------------------
@@ -220,20 +250,35 @@ function deriveRange(ranges: OsvRange[] | undefined): { ranges: string; patched:
   return { ranges: ">=0.0.0", patched: null };
 }
 
-/** Map an OSV/GHSA severity to the feed's `low|medium|high|critical`. Prefers GHSA's textual
- *  `database_specific.severity` (LOW/MODERATE/HIGH/CRITICAL), then an explicit `severity` string, else
- *  `medium`. CVSS-vector scoring is deliberately out of scope — the operator can re-scope on review. */
-function severityOf(rec: OsvRecord): string {
+/** Derive an imported advisory's severity band (and the CVSS vector it came from, when any). A CVSS
+ *  v3.x vector — computed honestly to a base score — is the strongest signal and is preferred: it gives
+ *  the canonical band *and* the vector is kept so a consumer can re-derive the score. The OSV `severity[]`
+ *  array carries CVSS entries (`{ type: "CVSS_V3", score: "<vector>" }`); the GHSA adapter maps
+ *  `cvss.vectorString` into the same shape. Falls back to the textual `database_specific.severity`
+ *  (LOW/MODERATE/HIGH/CRITICAL), then an explicit `severity` string, else `medium`. A CVSS score of 0.0
+ *  ("none" band) is treated as no signal — the text fallback wins, since an imported record is a real
+ *  advisory and shouldn't land below `low`. */
+function severityOf(rec: OsvRecord): { severity: string; cvss: string | null } {
+  if (Array.isArray(rec.severity)) {
+    for (const entry of rec.severity as OsvSeverity[]) {
+      if (entry?.type === "CVSS_V3" && typeof entry.score === "string") {
+        const scored = scoreVector(entry.score);
+        if (scored && scored.band !== "none") {
+          return { severity: scored.band, cvss: entry.score };
+        }
+      }
+    }
+  }
   const text = rec.database_specific?.severity;
   if (typeof text === "string") {
     const t = text.toLowerCase();
-    if (t === "moderate") return "medium";
-    if (SEVERITIES.has(t)) return t;
+    if (t === "moderate") return { severity: "medium", cvss: null };
+    if (SEVERITIES.has(t)) return { severity: t, cvss: null };
   }
   if (typeof rec.severity === "string" && SEVERITIES.has(rec.severity.toLowerCase())) {
-    return rec.severity.toLowerCase();
+    return { severity: rec.severity.toLowerCase(), cvss: null };
   }
-  return "medium";
+  return { severity: "medium", cvss: null };
 }
 
 /** The best link for an imported advisory: the first reference url, else the OSV canonical page. */

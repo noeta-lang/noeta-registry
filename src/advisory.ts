@@ -56,6 +56,7 @@ interface AdvisoryRow {
   bundle: string | null;
   upstream_id: string | null;
   upstream_url: string | null;
+  cvss: string | null;
 }
 
 /** The security-relevant fields of an advisory, in the exact byte layout that is signed — reproduced
@@ -152,6 +153,9 @@ export interface PreparedAdvisory {
   bundle: string | null;
   upstream_id: string | null;
   upstream_url: string | null;
+  // The CVSS v3.x vector this advisory's severity band was derived from (imported tier, when the
+  // upstream carried one). Echoed in the feed but NOT signed — the band is the trusted decision.
+  cvss: string | null;
 }
 
 /** Validate the fields common to every tier (id/package/ranges/severity/summary/details/url/patched),
@@ -228,13 +232,13 @@ export async function upsertAdvisory(env: AdvisoryEnv, a: PreparedAdvisory): Pro
   await env.DB.batch([
     env.DB
       .prepare(
-        "INSERT INTO advisories (id, package, ranges, patched, severity, summary, details, url, withdrawn, seq, signature, log_index, tier, bundle, upstream_id, upstream_url, created_at, updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "INSERT INTO advisories (id, package, ranges, patched, severity, summary, details, url, withdrawn, seq, signature, log_index, tier, bundle, upstream_id, upstream_url, cvss, created_at, updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT(id) DO UPDATE SET package = excluded.package, ranges = excluded.ranges, patched = excluded.patched, " +
           "severity = excluded.severity, summary = excluded.summary, details = excluded.details, url = excluded.url, " +
           "withdrawn = excluded.withdrawn, seq = excluded.seq, signature = excluded.signature, log_index = excluded.log_index, " +
           "tier = excluded.tier, bundle = excluded.bundle, upstream_id = excluded.upstream_id, upstream_url = excluded.upstream_url, " +
-          "updated_at = excluded.updated_at",
+          "cvss = excluded.cvss, updated_at = excluded.updated_at",
       )
       .bind(
         a.id,
@@ -253,6 +257,7 @@ export async function upsertAdvisory(env: AdvisoryEnv, a: PreparedAdvisory): Pro
         a.bundle,
         a.upstream_id,
         a.upstream_url,
+        a.cvss,
         now,
         now,
       ),
@@ -285,6 +290,7 @@ export async function publishAdvisory(request: Request, env: AdvisoryEnv): Promi
     bundle: null,
     upstream_id: null,
     upstream_url: null,
+    cvss: null,
   });
   return json({ status: "advisory published", id: common.id, tier: "operator", seq, log_index: idx }, 201);
 }
@@ -339,6 +345,7 @@ export async function publishScopeAdvisory(
     bundle: rawBundle,
     upstream_id: null,
     upstream_url: null,
+    cvss: null,
   });
   return json({ status: "advisory published", id: common.id, tier: "publisher", seq, log_index: idx }, 201);
 }
@@ -410,6 +417,7 @@ function toWire(r: AdvisoryRow) {
     bundle: r.bundle ?? undefined,
     upstream_id: r.upstream_id ?? undefined,
     upstream_url: r.upstream_url ?? undefined,
+    cvss: r.cvss ?? undefined,
   };
 }
 

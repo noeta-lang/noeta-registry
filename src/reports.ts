@@ -125,6 +125,28 @@ export async function listReports(
   return json({ reports: rows.map(toWire) });
 }
 
+/** GET /v1/reports/{id} — one report by id, for a promoter to fetch-and-prefill (advisory-intake
+ *  residual a). Authorized as the **operator** (admin token) or the **scope owner** of the report's own
+ *  package (scope publish token) — the same two identities that may promote it. Never public (a report
+ *  is unverified); `ip_hash` is never included. */
+export async function getReport(
+  request: Request,
+  env: ReportEnv,
+  id: string,
+  authorizeScope: (request: Request, env: AdvisoryEnv, company: string) => Promise<Response | true>,
+): Promise<Response> {
+  const report = await env.DB.prepare("SELECT * FROM reports WHERE id = ?").bind(id).first<ReportRow>();
+  if (!report) return json({ error: `report \`${id}\` not found` }, 404);
+  const presented = bearer(request);
+  const isAdmin = !!env.ADMIN_TOKEN && !!presented && timingEqual(presented, env.ADMIN_TOKEN);
+  if (!isAdmin) {
+    const scope = report.package.split("/")[0];
+    const auth = await authorizeScope(request, env, scope);
+    if (auth instanceof Response) return auth;
+  }
+  return json({ report: toWire(report) });
+}
+
 /** POST /v1/reports/{id}/promote — turn a report into an advisory. Authenticated as either an
  *  **operator** (admin token → an `operator`-tier advisory) or the **scope owner** of the report's
  *  package (scope publish token → a `publisher`-tier advisory, which must carry a keyless `bundle`). The
@@ -190,6 +212,7 @@ export async function promoteReport(
     bundle,
     upstream_id: null,
     upstream_url: null,
+    cvss: null,
   });
   const now = new Date().toISOString();
   await env.DB.prepare("UPDATE reports SET status = 'promoted', advisory_id = ?, updated_at = ? WHERE id = ?")
