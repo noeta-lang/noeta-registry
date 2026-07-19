@@ -15,6 +15,8 @@ import { githubConfig, verifyGithubOwnership } from "./github";
 import { domainConfig, verifyDomainOwnership } from "./domain";
 import * as log from "./log";
 import * as advisory from "./advisory";
+import * as reports from "./reports";
+import * as imports from "./imports";
 
 export interface Env {
   DB: D1Database;
@@ -42,6 +44,11 @@ export interface Env {
   // read feed is still served.
   ADVISORY_PRIVATE_KEY?: string;
   ADVISORY_PUBLIC_KEY?: string;
+  // Advisory-intake arc. REPORT_RATE_LIMIT caps how many public reports one IP may file per hour
+  // (tier 4, default 5). OSV_IMPORT_URL is the OSV-format feed the scheduled cron pulls to import
+  // external advisories through the operator-curated name map (tier 3); absent → the cron is a no-op.
+  REPORT_RATE_LIMIT?: string;
+  OSV_IMPORT_URL?: string;
 }
 
 interface VersionRow {
@@ -103,6 +110,18 @@ export default {
       return json({ error: `internal error: ${String(err)}` }, 500);
     }
   },
+
+  // Scheduled cron (advisory-intake arc, tier 3): pull the configured OSV feed and import mapped
+  // advisories. Idempotent per upstream id, so a repeated run refreshes rather than duplicating. A no-op
+  // when OSV_IMPORT_URL is unset; a fetch/parse failure is logged, never thrown past the platform.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      imports.runScheduledImport(env).then(
+        (r) => console.log(`advisory import: ${r.imported} imported, ${r.skipped} skipped`),
+        (err) => console.error(`advisory import failed: ${String(err)}`),
+      ),
+    );
+  },
 };
 
 async function route(request: Request, env: Env): Promise<Response> {
@@ -130,6 +149,18 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "policy" && request.method === "POST") {
     return setScopePolicy(request, env, parts[2]);
   }
+  // POST /v1/scopes/{scope}/advisories  — publisher-tier advisory for the scope's own package
+  // (owner-authenticated, carries a keyless bundle) (advisory-intake arc, tier 2)
+  if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "advisories" && request.method === "POST") {
+    return advisory.publishScopeAdvisory(request, env, parts[2], authorizeScope);
+  }
+  // GET /v1/scopes/{scope}/reports  — the scope owner's own triage queue (only their packages'
+  // reports; owner-authenticated) (advisory-intake arc, tier 4)
+  if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "reports" && request.method === "GET") {
+    const auth = await authorizeScope(request, env, parts[2]);
+    if (auth instanceof Response) return auth;
+    return reports.listReports(env, url.searchParams.get("status"), null, parts[2]);
+  }
   // GET /v1/scopes/{scope}  — the scope's public key (for verifying its release signatures)
   if (parts.length === 3 && parts[1] === "scopes" && request.method === "GET") {
     return getScopeKey(env, parts[2]);
@@ -154,12 +185,46 @@ async function route(request: Request, env: Env): Promise<Response> {
 
   // Security advisory feed (namespace-protection #1).
   if (parts[1] === "advisories") {
-    // POST /v1/advisories  — publish/update an advisory (admin only)
+    // POST /v1/advisories  — publish/update an operator-tier advisory (admin only)
     if (parts.length === 2 && request.method === "POST") return advisory.publishAdvisory(request, env);
+    // POST /v1/advisories/import  — import a batch of OSV records through the name map (admin, tier 3)
+    if (parts.length === 3 && parts[2] === "import" && request.method === "POST") {
+      return imports.importAdvisoriesFromRequest(request, env);
+    }
     if (request.method === "GET") {
       if (parts.length === 2) return advisory.listAdvisories(env, url.searchParams.get("since"));
       if (parts.length === 3 && parts[2] === "checkpoint") return advisory.advisoryCheckpoint(env);
       if (parts.length === 3 && parts[2] === "key") return advisory.advisoryPublicKey(env);
+    }
+  }
+
+  // Name mappings (advisory-intake arc, tier 3): external ecosystem name → Noeta package identity, the
+  // operator-curated data the OSV/GHSA/RUSTSEC import applies. Write is admin; read is public.
+  if (parts[1] === "name-mappings" && parts.length === 2) {
+    if (request.method === "POST") return imports.addNameMapping(request, env);
+    if (request.method === "GET") return imports.listNameMappings(env);
+  }
+
+  // Public report queue (advisory-intake arc, tier 4 — intake only). Filing is unauthenticated +
+  // rate-limited; listing/promote/dismiss are gated (admin, or the scope owner via the scope route above).
+  if (parts[1] === "reports") {
+    // POST /v1/reports  — file a report (anyone, rate-limited)
+    if (parts.length === 2 && request.method === "POST") return reports.fileReport(request, env);
+    // GET /v1/reports  — the operator triage queue (admin only)
+    if (parts.length === 2 && request.method === "GET") {
+      const presented = bearer(request);
+      if (!env.ADMIN_TOKEN || !presented || !timingEqual(presented, env.ADMIN_TOKEN)) {
+        return json({ error: "admin token required" }, 401);
+      }
+      return reports.listReports(env, url.searchParams.get("status"), url.searchParams.get("package"));
+    }
+    // POST /v1/reports/{id}/promote  — promote a report into an advisory (operator or scope owner)
+    if (parts.length === 4 && parts[3] === "promote" && request.method === "POST") {
+      return reports.promoteReport(request, env, parts[2], authorizeScope);
+    }
+    // POST /v1/reports/{id}/dismiss  — close a report without issuing an advisory (admin only)
+    if (parts.length === 4 && parts[3] === "dismiss" && request.method === "POST") {
+      return reports.dismissReport(request, env, parts[2]);
     }
   }
 

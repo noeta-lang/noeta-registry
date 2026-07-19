@@ -24,6 +24,15 @@
     "OIDC_ISSUER": "https://token.actions.githubusercontent.com",
     "OIDC_JWKS_URL": "https://token.actions.githubusercontent.com/.well-known/jwks",
     "OIDC_AUDIENCE": "noeta-registry"
+    // Advisory-intake arc: set OSV_IMPORT_URL (an OSV-format JSON feed) to enable the scheduled import
+    // (tier 3); the cron below then pulls it. REPORT_RATE_LIMIT overrides the per-IP report cap
+    // (tier 4, default 5/hour). Both are plain vars — add them here to turn the features on.
+  },
+  // Scheduled advisory import (advisory-intake arc, tier 3): pull OSV_IMPORT_URL daily and import mapped
+  // advisories through the operator-curated name map. Idempotent per upstream id; a no-op when
+  // OSV_IMPORT_URL is unset.
+  "triggers": {
+    "crons": ["0 6 * * *"]
   }
   // ADMIN_TOKEN is a secret, not committed: `wrangler secret put ADMIN_TOKEN`.
   // Transparency-log signing (namespace-protection #1): LOG_PRIVATE_KEY is a secret

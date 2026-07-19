@@ -25,6 +25,14 @@ client that consumes it lives in the language toolchain (`noeta-pm`), and this W
 - **Advisory README** — likewise, a release may carry its `README.md` (uploaded by `noeta publish`,
   since the registry never fetches source), rendered on the package's browser page; same posture
   as docs: mutable, unsigned, never affects resolution.
+- **Advisory intake tiers** — the signed advisory feed accepts advisories through three tiers, each
+  carrying its own provenance (automate provenance, never judgment): `operator` (admin-curated, the
+  anchor), `publisher` (a scope owner for their own scope, carrying a keyless Sigstore bundle the
+  consumer verifies offline), and `imported` (mirrored from OSV/GHSA/RUSTSEC through an
+  operator-curated name map, carrying upstream links). A separate, unauthenticated **public report
+  queue** (rate-limited) lets anyone flag a package; a report is never an advisory until an operator
+  or the scope owner **promotes** it. The tier is bound into each advisory's signed canonical bytes.
+  See `PROTOCOL.md`.
 
 ## Web UI
 

@@ -23,7 +23,7 @@ async function canonicalBytes(a: any): Promise<Uint8Array> {
   const state = a.withdrawn ? "withdrawn" : "active";
   return new TextEncoder().encode(
     `noeta-advisory-v1\n${a.id}\n${a.package}\n${a.ranges}\n${a.severity}\n` +
-      `${state}\n${a.summary}\n${detailsHash}\n${a.url ?? ""}\n`,
+      `${state}\n${a.summary}\n${detailsHash}\n${a.url ?? ""}\n${a.tier ?? "operator"}\n`,
   );
 }
 
