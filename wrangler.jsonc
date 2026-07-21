@@ -1,18 +1,21 @@
 {
   // Noeta registry Worker. Deploy with your own Cloudflare account:
-  //   npm run migrate:remote   (after `wrangler d1 create noeta-registry` and pasting its id below)
+  //   wrangler d1 create noeta-registry   (paste the printed id into database_id below)
+  //   npm run migrate:remote
   //   npm run deploy
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "noeta-registry",
   "main": "src/index.ts",
   "compatibility_date": "2025-07-01",
   "observability": { "enabled": true },
+  // The host noeta-pm defaults to for unmapped scopes (see manifest.rs). Wrangler
+  // manages the DNS record itself — do not add a CNAME by hand.
+  "routes": [{ "pattern": "registry.noeta.dev", "custom_domain": true }],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "noeta-registry",
-      // Replace with the id printed by `wrangler d1 create noeta-registry`.
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      "database_id": "423b31bf-f738-422d-8a6e-a68277ff90a8",
       "migrations_dir": "migrations"
     }
   ],
