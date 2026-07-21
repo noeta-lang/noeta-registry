@@ -21,12 +21,18 @@
   ],
   // Self-service scope claiming (namespace-protection #1). Issuer/JWKS default to GitHub Actions'
   // public OIDC provider, so only OIDC_AUDIENCE need be set — the value the publishing workflow must
-  // request its token for (e.g. this registry's hostname). Leaving OIDC_AUDIENCE unset disables
-  // claiming (the admin bootstrap still works).
+  // request its token for. Leaving OIDC_AUDIENCE unset disables OIDC claiming (the domain and GitHub
+  // device-flow paths, and the admin bootstrap, still work).
+  //
+  // Set this to YOUR deployment's hostname, never a generic product name. GitHub mints a token for
+  // whatever audience a workflow asks for, so `aud` is the only thing binding a token to one
+  // recipient. If two registries share an audience, an operator of one can relay a publisher's token
+  // to the other and claim that publisher's scope there — `repository_owner` still checks out, because
+  // it is genuinely their token. A per-deployment audience is what breaks the relay.
   "vars": {
     "OIDC_ISSUER": "https://token.actions.githubusercontent.com",
     "OIDC_JWKS_URL": "https://token.actions.githubusercontent.com/.well-known/jwks",
-    "OIDC_AUDIENCE": "noeta-registry",
+    "OIDC_AUDIENCE": "registry.noeta.dev",
     // The transparency log's Ed25519 public key, raw 32 bytes as hex — committed on
     // purpose: clients pin this to verify checkpoint signatures they fetch over an
     // untrusted path. NOT the SPKI DER openssl emits by default; the client's
