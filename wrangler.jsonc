@@ -26,7 +26,13 @@
   "vars": {
     "OIDC_ISSUER": "https://token.actions.githubusercontent.com",
     "OIDC_JWKS_URL": "https://token.actions.githubusercontent.com/.well-known/jwks",
-    "OIDC_AUDIENCE": "noeta-registry"
+    "OIDC_AUDIENCE": "noeta-registry",
+    // The transparency log's Ed25519 public key, raw 32 bytes as hex — committed on
+    // purpose: clients pin this to verify checkpoint signatures they fetch over an
+    // untrusted path. NOT the SPKI DER openssl emits by default; the client's
+    // hex_to_array::<32> (noeta-pm transparency.rs) rejects anything but the raw key.
+    // The private half signs checkpoints and is a Worker secret, never committed.
+    "LOG_PUBLIC_KEY": "e3c79f369bc9836b948444e80fef6ea5a073f6abe78a8f7b99ff249201548c8e"
     // Advisory-intake arc: the scheduled cron (below) pulls per-source upstream adapters and imports
     // mapped packages (residual c). Each source is env-gated:
     //   • OSV (api.osv.dev): on by default; set OSV_API="off" to disable, OSV_API_URL to override.
