@@ -97,9 +97,9 @@ const BUILTIN_SCOPES = new Set(["std", "noeta", "core"]);
 // First-party *published* namespaces → the GitHub org allowed to own them. These are resolvable like
 // any package, but reserved so a random org can't grab the name: unlike an ordinary scope (claimable
 // by the org/user of the *same* name), a first-party scope is claimable only by its **designated
-// org** — `para` only by `noeta-dev`. It still flows through the normal OIDC claim, so the first party
+// org** — `para` only by `noeta-lang`. It still flows through the normal OIDC claim, so the first party
 // needs no admin token; the admin bootstrap remains an escape hatch.
-const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-dev"]]);
+const FIRST_PARTY_SCOPES = new Map<string, string>([["para", "noeta-lang"]]);
 
 // Scopes the *web browser* needs for its own URLs. Packages live at the root (`/{company}/{package}`),
 // so a root path the browser owns — `/keywords/{keyword}` — would shadow a same-named scope's
@@ -744,7 +744,7 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
   }
 
   // The anti-squat rule: an ordinary scope is claimable by the org/user of the *same* name; a reserved
-  // first-party scope only by its designated org (so only `noeta-dev` can claim `para`).
+  // first-party scope only by its designated org (so only `noeta-lang` can claim `para`).
   const designatedOwner = FIRST_PARTY_SCOPES.get(scope);
   const requiredOwner = designatedOwner ?? scope;
 

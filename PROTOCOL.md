@@ -257,7 +257,7 @@ For **OIDC**, the Worker verifies the JWT against the issuer's JWKS (issuer/audi
 requires `repository_owner` to be the scope. For **OAuth**, it calls the GitHub API (`/user`, and for
 an org `/user/memberships/orgs/{org}` — needs `read:org`) to confirm the token holder is the scope's
 user or an active admin of the org. A **reserved first-party scope** is claimable only by its
-*designated org* (e.g. `para` only by `noeta-dev`).
+*designated org* (e.g. `para` only by `noeta-lang`).
 
 The two GitHub proofs resolve to the owner's **stable GitHub numeric id**, pinned as `owner_id` under
 one `owner_kind` (`github`) — so a scope claimed from CI and re-claimed from a laptop are one identity
@@ -300,7 +300,7 @@ Ed25519 `public_key` — for verifying the scope's release signatures — is opt
 `201 { "status": "scope registered", "scope": "acme" }`. The token is stored **hashed**
 (SHA-256); publishing presents the raw token and the Worker compares hashes. This is an escape hatch
 for provisioning a scope outside the OIDC flow; ordinary users — and the first party for its own
-reserved namespaces (e.g. `noeta-dev` claiming `para`) — take the OIDC `claim` path above. A built-in
+reserved namespaces (e.g. `noeta-lang` claiming `para`) — take the OIDC `claim` path above. A built-in
 namespace (`std`/`noeta`/`core`) is refused even here.
 
 ## Transparency log

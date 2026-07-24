@@ -122,18 +122,18 @@ describe("self-service scope claiming", () => {
   });
 
   it("lets a first-party scope be claimed only by its designated org", async () => {
-    // `para` is reserved to `noeta-dev`: another org proving its own identity cannot claim it, even
+    // `para` is reserved to `noeta-lang`: another org proving its own identity cannot claim it, even
     // though its OIDC token verifies — the anti-squat rule uses the designated owner, not the name.
     const intruder = await signJwt(privateKey, claims("randomcorp", "8"));
     const denied = await claim("para", intruder);
     expect(denied.status).toBe(403);
-    expect(((await denied.json()) as any).error).toContain("noeta-dev");
+    expect(((await denied.json()) as any).error).toContain("noeta-lang");
 
     // The designated org claims it via the ordinary OIDC flow — no admin token.
-    const owner = await signJwt(privateKey, claims("noeta-dev", "5050"));
+    const owner = await signJwt(privateKey, claims("noeta-lang", "5050"));
     const ok = await claim("para", owner);
     expect(ok.status).toBe(201);
-    expect(((await ok.json()) as any).owner).toBe("noeta-dev");
+    expect(((await ok.json()) as any).owner).toBe("noeta-lang");
 
     // And the bound token then publishes under `para`.
     const pub = await SELF.fetch("https://registry.test/v1/packages/para/html", {
