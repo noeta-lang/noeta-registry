@@ -28,6 +28,9 @@ export default defineWorkersConfig(async () => {
           singleWorker: true,
           wrangler: { configPath: "./wrangler.jsonc" },
           miniflare: {
+            // A second, initially-empty D1 the backup tests restore emitted dumps into — proving a
+            // dump executes verbatim against a fresh database (DEPLOY.md's restore ritual).
+            d1Databases: { RESTORE_DB: { id: "restore-db" } },
             bindings: {
               TEST_MIGRATIONS: migrations,
               WIRE_FIXTURES: readWireFixtures(),

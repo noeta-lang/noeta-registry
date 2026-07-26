@@ -92,20 +92,39 @@ about consistency. That is exactly the property that makes the checkpoint the ri
 Whole-database `wrangler d1 export` **does not work here** — it refuses databases with FTS5
 virtual tables ("cannot export databases with Virtual Tables (fts5)"), and this database has
 `package_fts`. So backups are **data-only, per-table** dumps; schema always comes from
-`migrations/`. `scripts/backup-d1.sh` loops every real table with
-`wrangler d1 export --no-schema --table <t>` into a timestamped directory:
+`migrations/`. Two producers emit the same dump format:
 
-```
-./scripts/backup-d1.sh              # writes backups/noeta-registry-<UTC timestamp>/<table>.sql
-./scripts/backup-d1.sh /mnt/nas/d1  # or into a directory of your choice
-```
+- **Nightly automated snapshots** (`src/backup.ts`): the Worker's own `30 6 * * *` cron dumps
+  every real table straight into the **`noeta-registry-backups`** R2 bucket (the `BACKUPS`
+  binding; create it once with `wrangler r2 bucket create noeta-registry-backups`). Layout:
 
-The table list lives in the script — keep it in sync when a migration adds a table.
+  ```
+  nightly/<UTC YYYYMMDDTHHMMSSZ>/<table>.sql   # one data-only dump per table
+  nightly/<UTC YYYYMMDDTHHMMSSZ>/manifest.json # written LAST — its presence marks a complete snapshot
+  ```
+
+  The manifest records per-table row counts and byte sizes plus the run's duration. A crashed run
+  leaves a manifest-**less** prefix — never restore from one of those; retention sweeps them out
+  along with everything beyond the **newest 90 snapshots** (~90 days).
+
+- **`scripts/backup-d1.sh`** stays the **manual, pre-migration** tool: the same table list, dumped
+  via `wrangler d1 export --no-schema --table <t>` into a local timestamped directory:
+
+  ```
+  ./scripts/backup-d1.sh              # writes backups/noeta-registry-<UTC timestamp>/<table>.sql
+  ./scripts/backup-d1.sh /mnt/nas/d1  # or into a directory of your choice
+  ```
+
+The table list lives in the script **and** in `BACKUP_TABLES` (`src/backup.ts`) — keep both in
+sync when a migration adds a table.
 
 `backups/` is gitignored — dumps are operator artifacts, not repo content. Restore, should it ever
-come to that, into a **fresh** database: apply `migrations/` first (recreates every table,
-including the FTS index and its triggers), then `wrangler d1 execute noeta-registry --remote
---file <table>.sql` for each dump, then rebuild the search index:
+come to that, into a **fresh** database. For a nightly snapshot, first download a dated prefix
+**that has a `manifest.json`** (e.g. `wrangler r2 object get noeta-registry-backups/nightly/<stamp>/<table>.sql`
+per table); a manual dump is already on disk. Then the ritual is identical for both: apply
+`migrations/` first (recreates every table, including the FTS index and its triggers), then
+`wrangler d1 execute noeta-registry --remote --file <table>.sql` for each dump, then rebuild the
+search index:
 
 ```
 wrangler d1 execute noeta-registry --remote --command "INSERT INTO package_fts(package_fts) VALUES('rebuild')"
@@ -117,9 +136,14 @@ operator advisory, not a quiet fix.
 
 ### Cadence
 
+- **Nightly, automatically** — the `30 6 * * *` cron snapshot to R2 (above), retained 90 days.
 - **Before every `migrate:remote`** — a migration is the only routine operation that rewrites the
-  schema, so it gets a pre-flight dump, every time.
-- **Weekly** otherwise (cron or calendar; the database is small — a dump is seconds and kilobytes).
+  schema, so it gets a pre-flight `scripts/backup-d1.sh` dump, every time (don't wait for the
+  nightly; the point is a dump of the exact pre-migration state).
 - Cloudflare's own **Time Travel** keeps 30 days of point-in-time restore for D1 independent of
-  these dumps; the exports are for what Time Travel doesn't cover — keeping history past 30 days,
-  and holding a copy outside Cloudflare.
+  these dumps; the exports keep history past 30 days.
+- **Account-compromise caveat**: the R2 snapshots live in the *same* Cloudflare account as the
+  database, so an attacker (or a billing mishap) that takes the account takes the backups with it.
+  The independent copy is the **off-site NAS puller**: a machine outside Cloudflare periodically
+  pulling either the R2 `nightly/` prefixes or a fresh `scripts/backup-d1.sh` dump onto storage
+  Cloudflare credentials can't touch.

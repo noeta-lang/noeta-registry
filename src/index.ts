@@ -17,9 +17,13 @@ import * as log from "./log";
 import * as advisory from "./advisory";
 import * as reports from "./reports";
 import * as imports from "./imports";
+import { runBackup, BACKUP_CRON } from "./backup";
 
 export interface Env {
   DB: D1Database;
+  // Nightly D1 snapshots land here (src/backup.ts): data-only per-table SQL dumps under
+  // `nightly/<stamp>/`, restorable via DEPLOY.md's ritual. Bound in wrangler.jsonc (r2_buckets).
+  BACKUPS: R2Bucket;
   // A Worker secret; gates the bootstrap `POST /v1/scopes` endpoint.
   ADMIN_TOKEN?: string;
   // OIDC config for self-service scope claiming (namespace-protection #1). Absent AUDIENCE disables
@@ -119,10 +123,26 @@ export default {
     }
   },
 
-  // Scheduled cron (advisory-intake arc, tier 3): pull the configured OSV feed and import mapped
-  // advisories. Idempotent per upstream id, so a repeated run refreshes rather than duplicating. A no-op
-  // when OSV_IMPORT_URL is unset; a fetch/parse failure is logged, never thrown past the platform.
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+  // Two independent cron jobs share this handler, dispatched on `event.cron` (which trigger fired):
+  //   • BACKUP_CRON ("30 6 * * *") — nightly D1 snapshot to R2 (src/backup.ts).
+  //   • anything else (the advisory import's "0 6 * * *", and any manual/dev trigger, preserving the
+  //     pre-backup behavior) — the advisory-intake cron (advisory-intake arc, tier 3): pull the
+  //     configured OSV feed and import mapped advisories. Idempotent per upstream id, so a repeated
+  //     run refreshes rather than duplicating. A no-op when OSV_IMPORT_URL is unset.
+  // Either way a failure is logged, never thrown past the platform.
+  async scheduled(event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (event.cron === BACKUP_CRON) {
+      ctx.waitUntil(
+        runBackup(env).then(
+          (r) =>
+            console.log(
+              `d1 backup: ${r.prefix} (${r.tables.length} tables, ${r.tables.reduce((n, t) => n + t.rows, 0)} rows, ${r.durationMs}ms; retention deleted ${r.deletedPrefixes.length})`,
+            ),
+          (err) => console.error(`d1 backup failed: ${String(err)}`),
+        ),
+      );
+      return;
+    }
     ctx.waitUntil(
       imports.runScheduledImport(env).then(
         (r) => console.log(`advisory import: ${r.imported} imported, ${r.skipped} skipped`),
@@ -164,7 +184,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   // POST /v1/scopes/{scope}/advisories  — publisher-tier advisory for the scope's own package
   // (owner-authenticated, carries a keyless bundle) (advisory-intake arc, tier 2)
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "advisories" && request.method === "POST") {
-    return advisory.publishScopeAdvisory(request, env, parts[2], authorizeScope);
+    return advisory.publishScopeAdvisory(request, env, parts[2], (r, _e, company) => authorizeScope(r, env, company));
   }
   // GET /v1/scopes/{scope}/reports  — the scope owner's own triage queue (only their packages'
   // reports; owner-authenticated) (advisory-intake arc, tier 4)
@@ -232,11 +252,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
     // GET /v1/reports/{id}  — one report by id, for a promoter to prefill (operator or scope owner)
     if (parts.length === 3 && request.method === "GET") {
-      return reports.getReport(request, env, parts[2], authorizeScope);
+      return reports.getReport(request, env, parts[2], (r, _e, company) => authorizeScope(r, env, company));
     }
     // POST /v1/reports/{id}/promote  — promote a report into an advisory (operator or scope owner)
     if (parts.length === 4 && parts[3] === "promote" && request.method === "POST") {
-      return reports.promoteReport(request, env, parts[2], authorizeScope);
+      return reports.promoteReport(request, env, parts[2], (r, _e, company) => authorizeScope(r, env, company));
     }
     // POST /v1/reports/{id}/dismiss  — close a report without issuing an advisory (admin only)
     if (parts.length === 4 && parts[3] === "dismiss" && request.method === "POST") {

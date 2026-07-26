@@ -19,6 +19,15 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Nightly automated D1 snapshots (src/backup.ts): data-only per-table SQL dumps under
+  // `nightly/<UTC stamp>/`, manifest.json written last, newest 90 snapshots kept. The bucket is
+  // created once by the operator:  wrangler r2 bucket create noeta-registry-backups
+  "r2_buckets": [
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "noeta-registry-backups"
+    }
+  ],
   // Self-service scope claiming (namespace-protection #1). Issuer/JWKS default to GitHub Actions'
   // public OIDC provider, so only OIDC_AUDIENCE need be set — the value the publishing workflow must
   // request its token for. Leaving OIDC_AUDIENCE unset disables OIDC claiming (the domain and GitHub
@@ -53,11 +62,14 @@
     // REPORT_RATE_LIMIT overrides the per-IP report cap (tier 4, default 5/hour). Plain vars go here;
     // tokens (GITHUB_TOKEN) are secrets — `wrangler secret put GITHUB_TOKEN`.
   },
-  // Scheduled advisory import (advisory-intake arc, tier 3): pull the configured source adapters daily
-  // and import mapped advisories through the operator-curated name map. Idempotent per upstream id; a
-  // no-op when no source is configured.
+  // Two independent daily crons — src/index.ts `scheduled()` branches on which one fired:
+  //   • "0 6 * * *"  — advisory import (advisory-intake arc, tier 3): pull the configured source
+  //     adapters and import mapped advisories through the operator-curated name map. Idempotent per
+  //     upstream id; a no-op when no source is configured.
+  //   • "30 6 * * *" — nightly D1 backup to the BACKUPS R2 bucket (src/backup.ts; must equal its
+  //     BACKUP_CRON constant).
   "triggers": {
-    "crons": ["0 6 * * *"]
+    "crons": ["0 6 * * *", "30 6 * * *"]
   }
   // ADMIN_TOKEN is a secret, not committed: `wrangler secret put ADMIN_TOKEN`.
   // Transparency-log signing (namespace-protection #1): LOG_PRIVATE_KEY is a secret

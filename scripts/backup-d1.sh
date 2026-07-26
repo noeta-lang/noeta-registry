@@ -22,7 +22,8 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 DEST="$OUT_DIR/$DB_NAME-$STAMP"
 
 # Every real (non-virtual, non-shadow) table, d1_migrations included so a restore knows its
-# migration state. Keep in sync with migrations/ when adding a table.
+# migration state. Keep in sync with migrations/ when adding a table, AND with BACKUP_TABLES in
+# src/backup.ts — the nightly automated R2 snapshot dumps the same list.
 TABLES=(d1_migrations scopes packages docs readmes package_keywords name_mappings log advisories reports rate_limits)
 
 mkdir -p "$DEST"
