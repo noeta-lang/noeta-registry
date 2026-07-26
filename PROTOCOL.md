@@ -12,6 +12,13 @@ everywhere:
 - **Optional fields are omitted when absent — never `null`** (both directions).
 - **Errors are always `{ "error": "<message>" }`** with a matching HTTP status.
 
+Three write endpoints an attacker can hammer without credentials doing any work are **rate-limited
+per IP** (sliding window; conservative — routine use never sees them): publish (`POST
+/v1/packages/…`, 10/minute), claim (`POST /v1/scopes/claim`, 3/hour), and rotate (`POST
+/v1/scopes/{scope}/rotate`, 5/hour). Over the limit → `429` with a `retry-after` header (seconds)
+and the standard error envelope; attempts count whether or not they succeed. Reads are **never**
+rate-limited. (Public report filing has its own flood valve — see `POST /v1/reports`.)
+
 The schema is pinned by **golden wire fixtures**: one canonical set of request/response JSON files,
 kept in the language repo at `crates/noeta-pm/test_data/wire/` and mirrored **verbatim** here at
 `test/fixtures/wire/` (same `MANIFEST.sha256` in both copies; each repo's test suite hashes its copy,

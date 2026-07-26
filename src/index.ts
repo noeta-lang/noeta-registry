@@ -151,7 +151,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   // POST /v1/scopes/claim  — self-service claim, proven by a GitHub OIDC token
   if (parts.length === 3 && parts[1] === "scopes" && parts[2] === "claim" && request.method === "POST") {
-    return claimScope(request, env);
+    return (await rateLimit(request, env, "claim")) ?? claimScope(request, env);
   }
   // POST /v1/scopes/{scope}/policy  — set the scope's publishing policy (owner-authenticated)
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "policy" && request.method === "POST") {
@@ -159,7 +159,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
   // POST /v1/scopes/{scope}/rotate  — mint a replacement publish token (current token or admin)
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "rotate" && request.method === "POST") {
-    return rotateScopeToken(request, env, parts[2]);
+    return (await rateLimit(request, env, "rotate")) ?? rotateScopeToken(request, env, parts[2]);
   }
   // POST /v1/scopes/{scope}/advisories  — publisher-tier advisory for the scope's own package
   // (owner-authenticated, carries a keyless bundle) (advisory-intake arc, tier 2)
@@ -254,7 +254,9 @@ async function route(request: Request, env: Env): Promise<Response> {
     const name = `${company}/${pkg}`;
 
     if (parts.length === 4 && request.method === "GET") return getVersions(env, name);
-    if (parts.length === 4 && request.method === "POST") return publish(request, env, company, name);
+    if (parts.length === 4 && request.method === "POST") {
+      return (await rateLimit(request, env, "publish")) ?? publish(request, env, company, name);
+    }
     if (parts.length === 6 && parts[5] === "yank" && request.method === "POST") {
       return yank(request, env, company, name, parts[4]);
     }
@@ -922,6 +924,58 @@ async function rotateScopeToken(request: Request, env: Env, scope: string): Prom
     token,
     note: "shown once — store it now; the previous token no longer publishes",
   });
+}
+
+/** Per-IP sliding-window limits on the write surface an attacker can hammer without credentials
+ *  doing any work (see migrations/0017_rate_limits.sql). Conservative: routine use never sees them —
+ *  a release train publishes a handful of packages a minute, a claim happens once per scope, a
+ *  rotation once per incident. Reads are never rate-limited. */
+const RATE_LIMITS = {
+  publish: { limit: 10, windowMs: 60_000, label: "10/minute" },
+  claim: { limit: 3, windowMs: 3_600_000, label: "3/hour" },
+  rotate: { limit: 5, windowMs: 3_600_000, label: "5/hour" },
+} as const;
+
+/** Gate one attempt at a rate-limited endpoint: `null` = proceed, or the 429 to return (with
+ *  `retry-after` computed from when the oldest counted attempt leaves the window). Counts a SHA-256
+ *  of the caller's IP — the raw address is never stored — in D1, the same mechanism as the report
+ *  queue's flood valve (and like it, a request with no client address, e.g. the test harness, is not
+ *  counted: the valve is flood control against real remote callers, not an account model). Attempts
+ *  are counted whether or not the handler later succeeds — the limiter runs before the handler, so
+ *  failed auth probes burn the same budget. A 429'd attempt is NOT recorded, so a blocked caller's
+ *  window drains rather than extending itself forever. */
+async function rateLimit(request: Request, env: Env, endpoint: keyof typeof RATE_LIMITS): Promise<Response | null> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "";
+  if (ip === "") return null;
+  const { limit, windowMs, label } = RATE_LIMITS[endpoint];
+  const ipHash = await sha256hex(ip);
+  const now = Date.now();
+  const windowStart = new Date(now - windowMs).toISOString();
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM rate_limits WHERE endpoint = ? AND ip_hash = ? AND created_at > ?",
+  )
+    .bind(endpoint, ipHash, windowStart)
+    .first<{ n: number; oldest: string | null }>();
+  if ((recent?.n ?? 0) >= limit) {
+    const retryMs = recent?.oldest ? Date.parse(recent.oldest) + windowMs - now : windowMs;
+    const retryAfter = Math.max(1, Math.ceil(retryMs / 1000));
+    return new Response(
+      JSON.stringify({ error: `rate limit reached for ${endpoint} (${label} per IP) — retry in ${retryAfter}s` }),
+      {
+        status: 429,
+        headers: { "content-type": "application/json; charset=utf-8", "retry-after": String(retryAfter) },
+      },
+    );
+  }
+  // Record this attempt and purge this pair's expired rows in the same batch — the table stays
+  // bounded by live windows without a scheduled sweep.
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO rate_limits (endpoint, ip_hash, created_at) VALUES (?, ?, ?)")
+      .bind(endpoint, ipHash, new Date(now).toISOString()),
+    env.DB.prepare("DELETE FROM rate_limits WHERE endpoint = ? AND ip_hash = ? AND created_at <= ?")
+      .bind(endpoint, ipHash, windowStart),
+  ]);
+  return null;
 }
 
 /** Authorize a publish/yank: the bearer token must own `company`'s scope. */
