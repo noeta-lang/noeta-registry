@@ -1115,7 +1115,12 @@ ul.keywords li{padding:0}
 .copy-btn[data-copied] .ic-check{display:block}
 @media (prefers-reduced-motion:reduce){.copy-btn{transition:none}}
 .side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
-@media (max-width:52rem){.pkg-grid{grid-template-columns:1fr}.pkg-side{position:static;order:-1}}
+/* Single column below 52rem. The column must be minmax(0,1fr): a bare 1fr keeps
+ * min-width:auto, so it floors at the sidebar's min-content — and .side-kv can't
+ * shrink past its two columns, which pinned every package page ~379px wide and
+ * bled past the viewport. min-width:0 plus a fixed table layout lets the
+ * metadata values wrap instead of setting the floor. */
+@media (max-width:52rem){.pkg-grid{grid-template-columns:minmax(0,1fr)}.pkg-side{position:static;order:-1;min-width:0}.side-kv{width:100%;table-layout:fixed}.side-kv td{overflow-wrap:anywhere}}
 /* advisories */
 .advisory{border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.15rem;margin:0 0 1rem;background:color-mix(in srgb,var(--surface-1) 55%,transparent)}
 .advisory.is-hit{border-color:color-mix(in srgb,var(--danger) 45%,var(--line-strong))}
@@ -1211,6 +1216,9 @@ pre.sig code{color:var(--text-0)}
 .prose.readme{margin-top:.6rem}
 .prose ul,.prose ol{margin:.6rem 0;padding-left:1.4rem}
 .prose li{margin:.2rem 0}
+/* READMEs routinely carry bare URLs (license links, badges). Without this they
+ * form one unbreakable box that outruns a narrow viewport. */
+.prose a,.prose code{overflow-wrap:anywhere}
 /* markdown tables (GFM) — subtle bordered cells in the registry's line/surface tokens; sized to
    content, and a too-wide table scrolls inside itself rather than breaking the column */
 .prose table{display:block;width:max-content;max-width:100%;overflow-x:auto;margin:1rem 0;font-size:.9rem}
