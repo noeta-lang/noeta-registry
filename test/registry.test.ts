@@ -490,3 +490,58 @@ describe("description", () => {
     expect(await r.json()).toMatchObject({ error: expect.stringContaining("reserved") });
   });
 });
+
+// Token rotation (alpha-hardening): a fresh server-minted publish token, authorized by the scope's
+// current token (routine hygiene) or the admin token (recovery). The raw token is returned exactly
+// once; only its hash is stored.
+describe("scope token rotation", () => {
+  const rotate = (scope: string, token?: string) =>
+    SELF.fetch(`https://registry.test/v1/scopes/${scope}/rotate`, {
+      method: "POST",
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+
+  it("rotates with the current publish token: old token stops publishing, new one publishes", async () => {
+    expect((await post("/scopes", { scope: "rotco", token: "rotco-token-0123456789" }, ADMIN)).status).toBe(201);
+    const r = await rotate("rotco", "rotco-token-0123456789");
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as any;
+    expect(body.status).toBe("token rotated");
+    expect(body.scope).toBe("rotco");
+    expect(body.token).toMatch(/^noeta_[0-9a-f]{64}$/);
+
+    // The replaced token no longer owns the scope…
+    const old = await post(
+      "/packages/rotco/lib",
+      { version: "1.0.0", url: "u", tag: "t", sha: "s" },
+      "rotco-token-0123456789",
+    );
+    expect(old.status).toBe(403);
+    // …and the minted one does.
+    const fresh = await post("/packages/rotco/lib", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, body.token);
+    expect(fresh.status).toBe(201);
+  });
+
+  it("rotates with the admin token (recovery), and each rotation mints a distinct token", async () => {
+    expect((await post("/scopes", { scope: "lostco", token: "lostco-token-0123456789" }, ADMIN)).status).toBe(201);
+    const a = (await (await rotate("lostco", ADMIN)).json()) as any;
+    const b = (await (await rotate("lostco", ADMIN)).json()) as any;
+    expect(a.token).toMatch(/^noeta_[0-9a-f]{64}$/);
+    expect(b.token).toMatch(/^noeta_[0-9a-f]{64}$/);
+    expect(a.token).not.toBe(b.token);
+    // Only the latest mint publishes.
+    expect((await post("/packages/lostco/lib", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, a.token)).status).toBe(403);
+    expect((await post("/packages/lostco/lib", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, b.token)).status).toBe(201);
+  });
+
+  it("refuses a missing, wrong, or other scope's token, and an unregistered scope", async () => {
+    expect((await post("/scopes", { scope: "rotauth", token: "rotauth-token-0123456789" }, ADMIN)).status).toBe(201);
+    expect((await rotate("rotauth")).status).toBe(401); // no bearer at all
+    expect((await rotate("rotauth", "not-the-token-at-all")).status).toBe(403);
+    expect((await rotate("rotauth", TOKEN)).status).toBe(403); // acme's token doesn't own rotauth
+    expect((await rotate("neverclaimed", "whatever-token-0123456789")).status).toBe(403);
+    // Rotation never touches the scope's ownership or policy — the original token still publishes.
+    const ok = await post("/packages/rotauth/lib", { version: "1.0.0", url: "u", tag: "t", sha: "s" }, "rotauth-token-0123456789");
+    expect(ok.status).toBe(201);
+  });
+});

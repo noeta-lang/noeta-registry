@@ -270,6 +270,13 @@ a different owner *kind* can never take over an existing scope. A reserved first
 Configure via `OIDC_ISSUER` / `OIDC_JWKS_URL` / `OIDC_AUDIENCE` (OIDC) and `GITHUB_API_URL` (OAuth,
 default `https://api.github.com`).
 
+A **newly claimed** scope starts with the **require-provenance (keyless)** policy — the same state
+`POST /v1/scopes/{scope}/policy` sets with `{ "require_provenance": true, "root": "keyless" }` — so
+a leaked publish token alone can't push a release from day one; every claim proof is an
+OIDC-adjacent identity, so keyless publishing is what a claimant already has. The owner can relax or
+retarget the policy at any time via the policy endpoint. A **re-claim** (token rotation) never
+changes the policy, and scopes claimed before this default keep whatever policy they had.
+
 ## `POST /v1/scopes/{scope}/policy` — set a scope's publishing policy
 
 Set the scope's **require-provenance** policy. Requires `Authorization: Bearer <token>` owning
@@ -287,10 +294,32 @@ When `require_provenance` is on, `POST /v1/packages/{scope}/…` **refuses a rel
 required provenance** (403) — so a leaked publish token alone can no longer push a release: the
 attacker also needs the signing key (`key` root, whose Ed25519 signature the registry verifies) or the
 OIDC identity behind a keyless bundle (`keyless` root). `root` narrows which is required; omitted, a
-key signature *or* a keyless bundle satisfies it. Default is off (unsigned allowed) so the existing
-ecosystem keeps working — this is opt-in, per scope, and the recommended setting for any scope whose
+key signature *or* a keyless bundle satisfies it. Admin-bootstrapped and pre-existing scopes default
+to off (unsigned allowed) so the existing ecosystem keeps working; a **newly claimed** scope defaults
+to on with the `keyless` root (see the claim endpoint above) — either way the policy stays the
+owner's to set, per scope, and require-provenance is the recommended setting for any scope whose
 releases are signed. Consumers can additionally demand provenance for a dependency independently of
 the scope's own policy via `[trust].require_provenance` in their `noeta.toml`.
+
+## `POST /v1/scopes/{scope}/rotate` — mint a replacement publish token
+
+Replace the scope's publish token with a **fresh, server-minted** one. Authorized by the scope's
+**current publish token** (routine hygiene) or the **admin token** (recovery — a claimant who lost
+the token can otherwise only re-claim, and an admin-bootstrapped scope can't re-claim). No body.
+
+```
+200 OK   { "status": "token rotated", "scope": "acme", "token": "noeta_<64-hex>",
+           "note": "shown once — store it now; the previous token no longer publishes" }
+401 Unauthorized   no bearer token presented
+403 Forbidden      token is neither the scope's current token nor the admin token, or the scope
+                   is not registered
+```
+
+The new token is generated server-side (32 random bytes — its entropy is never the caller's choice),
+stored **hashed** in one atomic UPDATE (there is never a moment with zero or two valid tokens), and
+returned **exactly once**: the registry keeps only the hash, so a lost response means another
+rotation, not a lookup. Rotation changes the credential only — ownership (`owner_kind`/`owner_id`),
+the scope's public key, and its provenance policy are untouched.
 
 ## `POST /v1/scopes` *(admin, bootstrap)*
 

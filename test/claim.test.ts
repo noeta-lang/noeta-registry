@@ -7,6 +7,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 // hermetically against the real Worker (issuer/audience/JWKS URL come from vitest.config.ts).
 
 const TOKEN = "claim-publish-token-abc123"; // a publish token the claimant binds to its scope
+// A shape-valid keyless bundle (the registry validates shape only — see PROTOCOL.md): what the
+// claim-time default policy (require-provenance, keyless root) demands a release carry.
+const BUNDLE = JSON.stringify({ mock: "sigstore-bundle" });
 
 let privateKey: CryptoKey;
 const KID = "test-key-1";
@@ -97,11 +100,21 @@ describe("self-service scope claiming", () => {
     expect(c.status).toBe(201);
     expect(((await c.json()) as any).owner).toBe("widgetco");
 
-    // The bound token now owns the scope end-to-end.
-    const pub = await SELF.fetch("https://registry.test/v1/packages/widgetco/gears", {
+    // A newly claimed scope defaults to require-provenance (keyless): the bound token alone —
+    // without a keyless bundle — cannot push a release.
+    const unsigned = await SELF.fetch("https://registry.test/v1/packages/widgetco/gears", {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s" }),
+    });
+    expect(unsigned.status).toBe(403);
+    expect(((await unsigned.json()) as any).error).toContain("keyless");
+
+    // With a keyless bundle, the bound token owns the scope end-to-end.
+    const pub = await SELF.fetch("https://registry.test/v1/packages/widgetco/gears", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s", bundle: BUNDLE }),
     });
     expect(pub.status).toBe(201);
   });
@@ -135,11 +148,12 @@ describe("self-service scope claiming", () => {
     expect(ok.status).toBe(201);
     expect(((await ok.json()) as any).owner).toBe("noeta-lang");
 
-    // And the bound token then publishes under `para`.
+    // And the bound token then publishes under `para` (with the keyless bundle the claim-time
+    // default policy requires).
     const pub = await SELF.fetch("https://registry.test/v1/packages/para/html", {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s" }),
+      body: JSON.stringify({ version: "1.0.0", url: "u", tag: "t", sha: "s", bundle: BUNDLE }),
     });
     expect(pub.status).toBe(201);
   });
@@ -286,7 +300,15 @@ describe("self-service scope claiming", () => {
     const c = await claimDomain("acme", "acme.dev");
     expect(c.status).toBe(201);
     expect(((await c.json()) as any).owner).toBe("acme.dev");
-    // The bound token owns the scope end-to-end.
+    // The claim-time default policy (require-provenance, keyless) is still the owner's to change:
+    // the bound token relaxes it through the policy endpoint…
+    const policy = await SELF.fetch("https://registry.test/v1/scopes/acme/policy", {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ require_provenance: false }),
+    });
+    expect(policy.status).toBe(200);
+    // …and then owns the scope end-to-end, unsigned.
     const pub = await SELF.fetch("https://registry.test/v1/packages/acme/widgets", {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}` },

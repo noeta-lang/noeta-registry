@@ -157,6 +157,10 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "policy" && request.method === "POST") {
     return setScopePolicy(request, env, parts[2]);
   }
+  // POST /v1/scopes/{scope}/rotate  — mint a replacement publish token (current token or admin)
+  if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "rotate" && request.method === "POST") {
+    return rotateScopeToken(request, env, parts[2]);
+  }
   // POST /v1/scopes/{scope}/advisories  — publisher-tier advisory for the scope's own package
   // (owner-authenticated, carries a keyless bundle) (advisory-intake arc, tier 2)
   if (parts.length === 4 && parts[1] === "scopes" && parts[3] === "advisories" && request.method === "POST") {
@@ -831,8 +835,15 @@ async function claimScope(request: Request, env: Env): Promise<Response> {
     return json({ status: "scope re-claimed", scope, owner: provenOwner }, 200);
   }
 
+  // A newly claimed scope defaults to **require-provenance, keyless root** — the same state
+  // `POST /v1/scopes/{scope}/policy` with `{ require_provenance: true, root: "keyless" }` sets.
+  // Every claim proof is an OIDC-adjacent identity (GitHub, or a domain), so keyless publishing is
+  // what a claimant already has, and secure-by-default means a leaked publish token alone can't push
+  // a release from day one. The owner can relax or retarget it through the policy endpoint; existing
+  // scopes (and re-claims above) are never touched — this applies only at first claim.
   await env.DB.prepare(
-    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
+    "INSERT INTO scopes (scope, token_sha, public_key, owner_kind, owner_id, require_provenance, provenance_root, created_at) " +
+      "VALUES (?, ?, NULL, ?, ?, 1, 'keyless', ?)",
   )
     .bind(scope, await sha256hex(token), ownerKind, ownerId, new Date().toISOString())
     .run();
@@ -870,6 +881,46 @@ async function setScopePolicy(request: Request, env: Env, scope: string): Promis
     scope,
     require_provenance,
     root: provenanceRoot ?? undefined,
+  });
+}
+
+/** POST /v1/scopes/{scope}/rotate — replace the scope's publish token with a fresh server-minted
+ *  one. Authorized by the scope's **current publish token** (routine hygiene) or the **admin token**
+ *  (recovery — the reason this endpoint exists at all: a claimant who lost the token can otherwise
+ *  only re-claim, and an admin-bootstrapped scope can't re-claim). The new token is generated
+ *  server-side (32 random bytes) so its entropy is never the caller's choice, stored hashed in one
+ *  UPDATE (atomic — there is never a moment with zero or two valid tokens), and returned exactly
+ *  once: the registry keeps only the hash, so a lost response means another rotation, not a lookup.
+ *  Ownership (`owner_kind`/`owner_id`), the public key, and the provenance policy are untouched —
+ *  this rotates the credential, never the identity. */
+async function rotateScopeToken(request: Request, env: Env, scope: string): Promise<Response> {
+  if (!IDENT.test(scope)) return json({ error: "scope must be an identifier" }, 400);
+  const presented = bearer(request);
+  if (!presented) return json({ error: "missing bearer token" }, 401);
+  const row = await env.DB.prepare("SELECT token_sha FROM scopes WHERE scope = ?")
+    .bind(scope)
+    .first<{ token_sha: string }>();
+  if (!row) return json({ error: `scope \`${scope}\` is not registered` }, 403);
+  const isAdmin = !!env.ADMIN_TOKEN && timingEqual(presented, env.ADMIN_TOKEN);
+  const ownsScope = timingEqual(await sha256hex(presented), row.token_sha);
+  if (!isAdmin && !ownsScope) {
+    return json(
+      { error: `token does not own scope \`${scope}\` — rotation requires the scope's current publish token or the admin token` },
+      403,
+    );
+  }
+
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const token = "noeta_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await env.DB.prepare("UPDATE scopes SET token_sha = ? WHERE scope = ?")
+    .bind(await sha256hex(token), scope)
+    .run();
+  return json({
+    status: "token rotated",
+    scope,
+    token,
+    note: "shown once — store it now; the previous token no longer publishes",
   });
 }
 
