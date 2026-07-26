@@ -13,6 +13,7 @@
 
 import type { Env } from "./index";
 import { highlightNoeta } from "./highlight";
+import { highlightToml } from "./highlight-toml";
 import { satisfies } from "./semver";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -21,15 +22,18 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
 
 /**
- * The one script the page runs: copy-to-clipboard for the install snippets. It is inline and pinned
- * in the CSP by the SHA-256 hash below, so only this exact byte sequence may execute — an injected
- * `<script>` still can't. If you edit this string, recompute the hash (the test in web.test.ts
- * fails until the two match).
+ * The one script the page runs: copy-to-clipboard for every `.snippet` code block (sidebar install
+ * lines, README fences, docs signatures). One delegated listener covers them all — blocks are
+ * server-rendered, so nothing needs re-wiring. The payload is the sibling `<code>`'s textContent:
+ * the browser decodes entities and drops the highlight spans, so the clipboard gets exactly the raw
+ * code, never the highlighted HTML. It is inline and pinned in the CSP by the SHA-256 hash below,
+ * so only this exact byte sequence may execute — an injected `<script>` still can't. If you edit
+ * this string, recompute the hash (the test in web.test.ts fails until the two match).
  */
 const COPY_SCRIPT =
-  `document.querySelectorAll(".copy-btn").forEach(function(b){b.addEventListener("click",function(){var c=b.parentElement.querySelector("code");if(!c||!navigator.clipboard)return;navigator.clipboard.writeText(c.textContent).then(function(){b.setAttribute("data-copied","");setTimeout(function(){b.removeAttribute("data-copied")},1200)})})});`;
+  `document.addEventListener("click",function(e){var t=e.target;var b=t&&t.closest?t.closest(".copy-btn"):null;if(!b)return;var c=b.parentElement.querySelector("code");if(!c||!navigator.clipboard)return;navigator.clipboard.writeText(c.textContent).then(function(){b.setAttribute("data-copied","");b.setAttribute("aria-label","Copied");setTimeout(function(){b.removeAttribute("data-copied");b.setAttribute("aria-label","Copy to clipboard")},2000)})});`;
 /** SHA-256 of COPY_SCRIPT, as a CSP `script-src` hash source. */
-const COPY_SCRIPT_HASH = "sha256-pl2cEDUvXR5+2Hw51aFJiH4Vab1+eIJ+cbydXuLH4R8=";
+const COPY_SCRIPT_HASH = "sha256-3BWWfCggIMSA3/qeEfPS9ISEwavdgUk8EKNF9CxDu/A=";
 
 /**
  * Progressive enhancement for the docs tab's search: filters the already-rendered declarations live
@@ -312,9 +316,9 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
 
     <h3>Install</h3>
     <p class="side-note">Run this in your project directory:</p>
-    ${snippet(install)}
+    ${snippetHtml(highlightInstall(install))}
     <p class="side-note">Or add it to your <code>noeta.toml</code>:</p>
-    ${snippet(manifest)}
+    ${snippetHtml(highlightToml(manifest))}
 
     <h3>Repository</h3>
     ${
@@ -325,10 +329,47 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
   </aside>`;
 }
 
-/** A copyable code snippet: the escaped code plus a hover-revealed copy button that COPY_SCRIPT
- *  wires up (it reads the sibling `<code>`). */
-function snippet(code: string): string {
-  return `<div class="snippet"><pre><code>${esc(code)}</code></pre><button class="copy-btn" type="button" aria-label="Copy to clipboard"></button></div>`;
+/** The copy button's inline SVG icons — the CSP allows no external assets, so they ride the markup.
+ *  CSS swaps clipboard → checkmark on the `[data-copied]` attribute COPY_SCRIPT sets. */
+const COPY_ICON =
+  `<svg class="ic-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const CHECK_ICON =
+  `<svg class="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+/**
+ * A copyable code block from *rendered* code HTML (already escaped, possibly carrying `tok-*`
+ * spans), plus the hover-revealed copy button COPY_SCRIPT wires up. The copy payload is the
+ * `<code>` element's textContent — entity-decoded, span-stripped by the browser — so a highlighted
+ * block still copies as its exact raw source.
+ */
+function snippetHtml(codeHtml: string, preClass = ""): string {
+  return `<div class="snippet"><pre${preClass ? ` class="${preClass}"` : ""}><code>${codeHtml}</code></pre><button class="copy-btn" type="button" aria-label="Copy to clipboard">${COPY_ICON}${CHECK_ICON}</button></div>`;
+}
+
+/**
+ * Minimal shell coloring for the sidebar's `noeta add …` snippet ONLY — the command word and its
+ * `--flags`, values left plain. Deliberately not a shell highlighter (no quoting, no operators):
+ * that honesty is why it is not applied to arbitrary ```sh fences.
+ */
+function highlightInstall(cmd: string): string {
+  let first = true;
+  return cmd
+    .split("\n")
+    .map((line) =>
+      line
+        .split(/(\s+)/)
+        .map((word) => {
+          if (word === "" || /^\s+$/.test(word)) return esc(word);
+          if (first) {
+            first = false;
+            return `<span class="tok-fn">${esc(word)}</span>`;
+          }
+          if (word.startsWith("--")) return `<span class="tok-kw">${esc(word)}</span>`;
+          return esc(word);
+        })
+        .join(""),
+    )
+    .join("\n");
 }
 
 /** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
@@ -463,7 +504,7 @@ function renderDecl(modId: string, d: DocsDecl, query: string): string {
   // collide across the by-module API reference.
   return `<section class="decl" id="${modId}--${slug(d.name!)}" data-text="${esc(declText(d))}"${hidden}>
     <h3><span class="kind">${esc(d.kind!)}</span> <code>${esc(d.name!)}</code></h3>
-    ${d.signature ? `<pre class="sig"><code>${highlightNoeta(d.signature)}</code></pre>` : ""}
+    ${d.signature ? snippetHtml(highlightNoeta(d.signature), "sig") : ""}
     ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
   </section>`;
 }
@@ -882,8 +923,10 @@ function md(input: string): string {
   };
   while (i < lines.length) {
     const line = lines[i];
-    // Fenced code block. A `noeta`/`noe` info-string routes the RAW body through the syntax
-    // highlighter (which escapes internally); every other fence keeps the plain escaped rendering.
+    // Fenced code block. A `noeta`/`noe` info-string routes the RAW body through the Noeta syntax
+    // highlighter and `toml` through the TOML one (both escape internally); every other fence keeps
+    // the plain escaped rendering. Each lands in a `.snippet` wrapper, so every fenced block gets
+    // the copy button (whose payload is the raw text — see snippetHtml).
     if (line.trimStart().startsWith("```")) {
       flushPara();
       const info = line.trimStart().slice(3).trim();
@@ -898,8 +941,10 @@ function md(input: string): string {
       i++; // consume closing fence
       out.push(
         info === "noeta" || info === "noe"
-          ? `<pre class="noeta-code"><code>${highlightNoeta(raw.join("\n"))}</code></pre>`
-          : `<pre><code>${code.join("\n")}</code></pre>`,
+          ? snippetHtml(highlightNoeta(raw.join("\n")), "noeta-code")
+          : info === "toml"
+            ? snippetHtml(highlightToml(raw.join("\n")), "toml-code")
+            : snippetHtml(code.join("\n")),
       );
       continue;
     }
@@ -1106,15 +1151,20 @@ ul.keywords li{padding:0}
    one-line TOML table scrolls. */
 .pkg-side pre{padding:.55rem .7rem;white-space:pre;overflow-x:auto}
 .pkg-side pre code{font-size:.75rem;line-height:1.55}
-/* copy button — revealed on hover/focus, wired up by COPY_SCRIPT */
-.snippet{position:relative}
+/* copy button — an icon (inline SVG; the CSP allows no external assets), revealed on hover/focus,
+   wired up by COPY_SCRIPT. [data-copied] swaps clipboard → checkmark for ~2s. Every .snippet gets
+   one: sidebar install lines, README/docs fenced blocks, and docs signature blocks. */
+.snippet{position:relative;margin:1rem 0}
+.pkg-side .snippet{margin:0}
 .snippet pre{margin:0}
-.copy-btn{position:absolute;top:.4rem;right:.4rem;padding:.16rem .5rem;border:1px solid var(--line-strong);border-radius:6px;background:color-mix(in srgb,var(--surface-2) 90%,transparent);color:var(--text-1);font-family:var(--font-mono);font-size:.66rem;letter-spacing:.02em;cursor:pointer;opacity:0;transition:opacity 140ms ease,color 140ms ease,border-color 140ms ease}
-.copy-btn::after{content:"Copy"}
+.copy-btn{position:absolute;top:.4rem;right:.4rem;display:inline-flex;align-items:center;justify-content:center;padding:.28rem;border:1px solid var(--line-strong);border-radius:6px;background:color-mix(in srgb,var(--surface-2) 90%,transparent);color:var(--text-1);cursor:pointer;opacity:0;transition:opacity 140ms ease,color 140ms ease,border-color 140ms ease}
+.copy-btn svg{display:block;width:.85rem;height:.85rem}
+.copy-btn .ic-check{display:none}
 .snippet:hover .copy-btn,.copy-btn:focus-visible{opacity:1}
 .copy-btn:hover{color:var(--text-0);border-color:var(--accent)}
 .copy-btn[data-copied]{opacity:1;color:var(--accent-2-bright);border-color:color-mix(in srgb,var(--accent-2) 45%,var(--line-strong))}
-.copy-btn[data-copied]::after{content:"Copied"}
+.copy-btn[data-copied] .ic-copy{display:none}
+.copy-btn[data-copied] .ic-check{display:block}
 @media (prefers-reduced-motion:reduce){.copy-btn{transition:none}}
 .side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
 @media (max-width:52rem){.pkg-grid{grid-template-columns:1fr}.pkg-side{position:static;order:-1}}

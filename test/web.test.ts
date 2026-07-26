@@ -1,6 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { highlightNoeta } from "../src/highlight";
+import { highlightToml } from "../src/highlight-toml";
 
 const ADMIN = "test-admin-token"; // matches vitest.config.ts miniflare bindings
 const TOKEN = "acme-publish-token-abc123";
@@ -110,7 +111,8 @@ const NOETA_SNIPPET_HTML = [
 
 // A README whose fenced code exercises the server-side highlighter end to end: a ```noeta fence
 // (raw `<`, `"`, and `${…}` must land escaped exactly once), a ```rust fence that must keep the
-// plain escaped rendering, and a ```noe fence that tries to break out of the <code> element.
+// plain escaped rendering, a ```toml fence (the para READMEs' Installation sections), and a
+// ```noe fence that tries to break out of the <code> element.
 const NOETA_README = [
   "# codey",
   "",
@@ -124,10 +126,33 @@ const NOETA_README = [
   'fn main() { println!("hi") }',
   "```",
   "",
+  "```toml",
+  "[dependencies]",
+  'codey = { version = "^0.1.0" }',
+  "```",
+  "",
   "```noe",
   "</code><script>alert(3)</script>",
   "```",
 ].join("\n");
+
+// The sidebar install command, as the server highlights it: the command word tok-fn, `--flags`
+// tok-kw, values (and the shell continuations) plain.
+const INSTALL_HTML =
+  '<span class="tok-fn">noeta</span> add \\\n' +
+  '  <span class="tok-kw">--package</span> acme/greeter \\\n' +
+  '  <span class="tok-kw">--version</span> ^1.1.0';
+
+// The sidebar's one-line TOML dependency snippet, highlighted: keys tok-type (including inside the
+// inline table), strings tok-str with entity-escaped quotes, braces plain.
+const MANIFEST_HTML =
+  '<span class="tok-type">greeter</span> = { <span class="tok-type">version</span> = ' +
+  '<span class="tok-str">&quot;^1.1.0&quot;</span>, <span class="tok-type">package</span> = ' +
+  '<span class="tok-str">&quot;acme/greeter&quot;</span> }';
+
+// The copy button: an inline SVG clipboard (the CSP allows no external assets) that COPY_SCRIPT
+// swaps to a checkmark via [data-copied], with the accessible name on the button itself.
+const COPY_BTN = '<button class="copy-btn" type="button" aria-label="Copy to clipboard"><svg class="ic-copy"';
 
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
@@ -211,12 +236,11 @@ describe("registry web UI", () => {
     // the value a reader verifies against must be on the page and selectable.
     expect(body).toContain(`<td class="mono sha">${LATEST_SHA}</td>`);
     // The rail tells you how to actually depend on it.
-    // Shell continuations keep the whole command visible in the narrow rail; it pastes as-is.
-    expect(body).toContain("noeta add \\\n  --package acme/greeter \\\n  --version ^1.1.0");
-    // Escape-first: the quotes are entity-escaped in the source and render as `"` in the browser.
-    expect(body).toContain(
-      `greeter = { version = &quot;^1.1.0&quot;, package = &quot;acme/greeter&quot; }`,
-    );
+    // Shell continuations keep the whole command visible in the narrow rail; the highlight spans
+    // wrap words without touching the text, so it still pastes as-is (textContent is the payload).
+    expect(body).toContain(INSTALL_HTML);
+    // Escape-first: the quotes are entity-escaped inside the tok-str spans and render as `"`.
+    expect(body).toContain(MANIFEST_HTML);
     // A repository button — the release's git URL, labelled by destination.
     expect(body).toContain(`href="https://github.com/acme/greeter"`);
     expect(body).toContain("github.com/acme/greeter →");
@@ -235,7 +259,7 @@ describe("registry web UI", () => {
     expect(versions).toContain(`href="/acme/greeter/1.0.0"`); // the older release is still listed
     expect(versions).toContain(`<tr class="here">`); // the selected version is marked
     // The shell (and the install line) survives the tab switch.
-    expect(versions).toContain("noeta add \\\n  --package acme/greeter \\\n  --version ^1.1.0");
+    expect(versions).toContain(INSTALL_HTML);
 
     const deps = await (await web("/acme/greeter/1.1.0/deps")).text();
     expect(deps).toContain("0 Dependencies");
@@ -511,5 +535,98 @@ describe("noeta syntax highlighting", () => {
     expect(body).not.toContain("<script>alert(3)");
     // The payload is present, but escaped inside token spans.
     expect(body).toContain(`<span class="tok-tag">&lt;/code&gt;</span><span class="tok-tag">&lt;script&gt;</span>`);
+  });
+});
+
+describe("toml syntax highlighting", () => {
+  it("highlights a known snippet into the exact token spans (pinned output)", () => {
+    // Header + trailing comment, an inline table with two keys, a basic string with escaped quotes
+    // and markup characters, a literal string with a backslash, numbers, and booleans.
+    const toml = [
+      "# manifest",
+      "[dependencies] # deps",
+      'greeter = { version = "^1.1.0", package = "acme/greeter" }',
+      'title = "a \\"quoted\\" <name>"',
+      "path = 'C:\\temp'",
+      "max = 42",
+      "pi = 3.14",
+      "on = true",
+      "off = false",
+    ].join("\n");
+    const expected = [
+      '<span class="tok-cmt"># manifest</span>',
+      '<span class="tok-kw">[dependencies]</span> <span class="tok-cmt"># deps</span>',
+      MANIFEST_HTML,
+      '<span class="tok-type">title</span> = <span class="tok-str">&quot;a \\&quot;quoted\\&quot; &lt;name&gt;&quot;</span>',
+      "<span class=\"tok-type\">path</span> = <span class=\"tok-str\">'C:\\temp'</span>",
+      '<span class="tok-type">max</span> = <span class="tok-num">42</span>',
+      '<span class="tok-type">pi</span> = <span class="tok-num">3.14</span>',
+      '<span class="tok-type">on</span> = <span class="tok-kw">true</span>',
+      '<span class="tok-type">off</span> = <span class="tok-kw">false</span>',
+    ].join("\n");
+    expect(highlightToml(toml)).toBe(expected);
+  });
+
+  it("carries tok spans on the sidebar install and TOML snippets", async () => {
+    const body = await (await web("/acme/greeter")).text();
+    expect(body).toContain(INSTALL_HTML);
+    expect(body).toContain(MANIFEST_HTML);
+  });
+
+  it("renders a ```toml README fence highlighted while ```rust stays plain", async () => {
+    const body = await (await web("/acme/codey")).text();
+    expect(body).toContain(
+      `<pre class="toml-code"><code><span class="tok-kw">[dependencies]</span>\n` +
+        `<span class="tok-type">codey</span> = { <span class="tok-type">version</span> = ` +
+        `<span class="tok-str">&quot;^0.1.0&quot;</span> }</code></pre>`,
+    );
+    // The rust fence keeps the plain escaped rendering — no token spans.
+    expect(body).toContain(`<pre><code>fn main() { println!(&quot;hi&quot;) }</code></pre>`);
+  });
+});
+
+describe("copy buttons", () => {
+  it("renders as an inline SVG icon pair, not text, with the accessible name preserved", async () => {
+    const body = await (await web("/acme/greeter")).text();
+    // The clipboard icon rides the button markup; the checkmark sibling is swapped in by CSS on
+    // the [data-copied] attribute COPY_SCRIPT sets (and the script also swaps the aria-label).
+    expect(body).toContain(COPY_BTN);
+    expect(body).toContain('<svg class="ic-check"');
+    // The old text affordance is gone from the stylesheet.
+    expect(body).not.toContain('content:"Copy"');
+    expect(body).not.toContain('content:"Copied"');
+    // The script flips the accessible name while copied, and back.
+    expect(body).toContain('b.setAttribute("aria-label","Copied")');
+    expect(body).toContain('b.setAttribute("aria-label","Copy to clipboard")');
+  });
+
+  it("appears on every README fenced block and docs code block, not just the sidebar", async () => {
+    // codey's README: noeta, rust, toml, and noe fences — four blocks, plus two sidebar snippets.
+    const readme = await (await web("/acme/codey")).text();
+    expect((readme.match(/class="copy-btn"/g) || []).length).toBe(6);
+    // Highlighted and plain fences alike sit in the .snippet wrapper the delegated script serves.
+    expect(readme).toContain('<div class="snippet"><pre class="noeta-code">');
+    expect(readme).toContain('<div class="snippet"><pre class="toml-code">');
+    expect(readme).toContain('<div class="snippet"><pre><code>fn main()');
+    // Docs signature blocks get the same affordance.
+    const docs = await (await web("/acme/std/1.0.0/docs")).text();
+    expect(docs).toContain('<div class="snippet"><pre class="sig">');
+  });
+
+  it("copies the RAW code of a highlighted block — textContent round-trips exactly", async () => {
+    // COPY_SCRIPT copies the <code> element's textContent. Simulate that: strip the spans and
+    // decode the entities of the served noeta block; the result must be the exact raw snippet —
+    // including the `<`, `"`, and `${…}` that the highlighter escaped.
+    const body = await (await web("/acme/codey")).text();
+    const m = body.match(/<pre class="noeta-code"><code>([\s\S]*?)<\/code><\/pre>/);
+    expect(m).not.toBeNull();
+    const textContent = m![1]
+      .replace(/<[^>]+>/g, "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&");
+    expect(textContent).toBe(NOETA_SNIPPET);
   });
 });
