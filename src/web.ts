@@ -6,11 +6,13 @@
 // provenance) and stored docs, so it needs no auth, no sessions, and no account model. The JSON
 // API under `/v1` is untouched.
 //
-// Dependency-free, matching the Worker's posture: the small Markdown renderer below is hand-written
-// and **escape-first** — doc prose is publisher-supplied and rendered in other readers' browsers, so
-// it is HTML-escaped before any formatting and links are scheme-sanitized (no `javascript:`), so a
-// malicious `docs.json` cannot inject script.
+// Markdown rendering is delegated to markdown-it (bundled at build time), configured **escape-first**:
+// `html: false` means publisher-supplied HTML is always rendered as escaped text, and markdown-it's
+// default link validation refuses `javascript:` and friends — so a malicious `docs.json` or README
+// cannot inject script. The page CSP (default-src 'none', hash-pinned scripts) backs this as defense
+// in depth, and the XSS suite in web.test.ts pins the behavior.
 
+import MarkdownIt from "markdown-it";
 import type { Env } from "./index";
 import { highlightNoeta } from "./highlight";
 import { highlightToml } from "./highlight-toml";
@@ -898,116 +900,62 @@ function slug(s: string): string {
 }
 
 /**
- * Render a **small, safe Markdown subset** to HTML. Escape-first (the input is publisher-supplied),
- * then apply block + inline formatting on the escaped text — Markdown's syntax characters
- * (`# * ` [ ] ( ) -`) survive HTML escaping, so parsing after escaping is sound and injection-proof.
- * Supports: fenced code, ATX headings, unordered lists, paragraphs; inline code, bold, italic, and
- * scheme-sanitized links. The one deliberate exception to "walk escaped text": a ```noeta fence's
- * body is taken from the RAW lines, because highlightNoeta() escapes internally — every emitted
- * path still escapes exactly once.
+ * The one markdown-it instance — configured ONCE, module-level, and shared by every `md()` call.
+ *
+ * The security posture the old hand-rolled renderer carried now rests entirely on this config plus
+ * the XSS suite in web.test.ts:
+ * - `html: false` is THE invariant: raw HTML in publisher content (READMEs, docs.json prose) is
+ *   rendered as escaped text, never parsed — `<script>` and `<img onerror>` land inert.
+ * - markdown-it's default `validateLink` refuses `javascript:`, `vbscript:`, `file:`, and non-image
+ *   `data:` schemes, so a hostile link renders as plain text (the suite pins this).
+ * - `linkify` and `typographer` stay off: no autolinking of bare text, no punctuation rewriting.
+ *
+ * The default preset brings what the hand-rolled renderer could not: GFM tables (the para/p2p
+ * README bug), ordered/nested lists, and blockquotes.
+ *
+ * CPU: markdown-it parses README-sized input on a sub-ms-to-ms scale, well inside the Worker CPU
+ * budget — no render caching is needed today.
  */
-function md(input: string): string {
-  // Escaped and raw lines in lockstep: esc() never touches "\n", so index i addresses the same
-  // source line in both arrays. The raw lines exist solely for fenced Noeta code — the highlighter
-  // escapes internally, so it must receive RAW text (pre-escaped lines would double-escape).
-  const rawLines = input.split("\n");
-  const lines = esc(input).split("\n");
-  const out: string[] = [];
-  let i = 0;
-  let para: string[] = [];
-  const flushPara = () => {
-    if (para.length) {
-      out.push(`<p>${inline(para.join(" "))}</p>`);
-      para = [];
-    }
-  };
-  while (i < lines.length) {
-    const line = lines[i];
-    // Fenced code block. A `noeta`/`noe` info-string routes the RAW body through the Noeta syntax
-    // highlighter and `toml` through the TOML one (both escape internally); every other fence keeps
-    // the plain escaped rendering. Each lands in a `.snippet` wrapper, so every fenced block gets
-    // the copy button (whose payload is the raw text — see snippetHtml).
-    if (line.trimStart().startsWith("```")) {
-      flushPara();
-      const info = line.trimStart().slice(3).trim();
-      const code: string[] = [];
-      const raw: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
-        code.push(lines[i]);
-        raw.push(rawLines[i]);
-        i++;
-      }
-      i++; // consume closing fence
-      out.push(
-        info === "noeta" || info === "noe"
-          ? snippetHtml(highlightNoeta(raw.join("\n")), "noeta-code")
-          : info === "toml"
-            ? snippetHtml(highlightToml(raw.join("\n")), "toml-code")
-            : snippetHtml(code.join("\n")),
-      );
-      continue;
-    }
-    // ATX heading — offset by +2 so a doc `#` nests under the page's h1/h2 as an h3.
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) {
-      flushPara();
-      const level = Math.min(6, h[1].length + 2);
-      out.push(`<h${level}>${inline(h[2])}</h${level}>`);
-      i++;
-      continue;
-    }
-    // Unordered list.
-    if (/^\s*[-*]\s+/.test(line)) {
-      flushPara();
-      const items: string[] = [];
-      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(`<li>${inline(lines[i].replace(/^\s*[-*]\s+/, ""))}</li>`);
-        i++;
-      }
-      out.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-    // Blank line ends a paragraph.
-    if (line.trim() === "") {
-      flushPara();
-      i++;
-      continue;
-    }
-    para.push(line);
-    i++;
-  }
-  flushPara();
-  return out.join("\n");
-}
+const markdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
-/** Inline Markdown on already-escaped text: code spans (protected first), links, bold, italic. */
-function inline(text: string): string {
-  // Protect inline-code spans so bold/italic never fire inside them. The placeholder is
-  // NUL-delimited (`\x00N\x00`) so it can't collide with real content the way a bare
-  // ` 2 ` in prose would (which would restore to `undefined`); escaped text never has NUL.
-  const codes: string[] = [];
-  let s = text.replace(/`([^`]+)`/g, (_m, c) => {
-    codes.push(`<code>${c}</code>`);
-    return `\x00${codes.length - 1}\x00`;
-  });
-  // Links [text](url) — url is scheme-sanitized; a rejected scheme renders as the bare text.
-  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_m, label, url) => {
-    const safe = sanitizeUrl(url);
-    return safe ? `<a href="${safe}" rel="nofollow noopener">${label}</a>` : label;
-  });
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
-  s = s.replace(/_([^_]+)_/g, "<em>$1</em>");
-  // Restore code spans.
-  s = s.replace(/\x00(\d+)\x00/g, (_m, n) => codes[Number(n)]);
-  return s;
+/**
+ * Fenced code (and, below, indented code): a `noeta`/`noe` info-string routes the RAW body through
+ * the Noeta syntax highlighter and `toml` through the TOML one (both escape internally); every
+ * other fence keeps the plain escaped rendering. ALL of them land in the `.snippet` wrapper, so
+ * every code block gets the copy button — whose payload is the `<code>` element's textContent, so
+ * a highlighted block still copies as its exact raw source (see snippetHtml).
+ */
+markdown.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  const lang = token.info.trim().split(/\s+/)[0] ?? "";
+  const raw = token.content.replace(/\n$/, "");
+  if (lang === "noeta" || lang === "noe") return snippetHtml(highlightNoeta(raw), "noeta-code");
+  if (lang === "toml") return snippetHtml(highlightToml(raw), "toml-code");
+  return snippetHtml(esc(raw));
+};
+markdown.renderer.rules.code_block = (tokens, idx) => snippetHtml(esc(tokens[idx].content.replace(/\n$/, "")));
+
+// ATX headings — offset by +2 (clamped at h6) so a doc `#` nests under the page's h1/h2 as an h3.
+const offsetHeading = (tag: string): string => `h${Math.min(6, Number(tag.slice(1)) + 2)}`;
+markdown.renderer.rules.heading_open = (tokens, idx) => `<${offsetHeading(tokens[idx].tag)}>`;
+markdown.renderer.rules.heading_close = (tokens, idx) => `</${offsetHeading(tokens[idx].tag)}>\n`;
+
+// Links carry the same rel the old renderer emitted (no target — same-tab navigation, as before).
+markdown.renderer.rules.link_open = (tokens, idx, options, _env, self) => {
+  tokens[idx].attrSet("rel", "nofollow noopener");
+  return self.renderToken(tokens, idx, options);
+};
+
+/** Render publisher-supplied Markdown (README, docs.json prose) to HTML — see `markdown` above. */
+function md(input: string): string {
+  return markdown.render(input);
 }
 
 /**
  * Allow only http(s), root-relative, anchor, and mailto URLs — everything else (notably
- * `javascript:`) is rejected so a doc link can't run script. The input is HTML-escaped, so it is
- * already safe to place in an attribute; this gates the *scheme*.
+ * `javascript:`) is rejected so an advisory's reference link can't run script. Markdown links
+ * are gated separately, by markdown-it's default `validateLink`. The input is HTML-escaped, so
+ * it is already safe to place in an attribute; this gates the *scheme*.
  */
 function sanitizeUrl(url: string): string | null {
   const u = url.trim();
@@ -1261,6 +1209,15 @@ pre.sig code{color:var(--text-0)}
 .kind{font-family:var(--font-mono);color:var(--accent-2);font-weight:500;font-size:.72em;letter-spacing:.06em;text-transform:uppercase}
 .prose{max-width:65ch;color:var(--text-1)}.prose p{margin:.6rem 0}
 .prose.readme{margin-top:.6rem}
+.prose ul,.prose ol{margin:.6rem 0;padding-left:1.4rem}
+.prose li{margin:.2rem 0}
+/* markdown tables (GFM) — subtle bordered cells in the registry's line/surface tokens; sized to
+   content, and a too-wide table scrolls inside itself rather than breaking the column */
+.prose table{display:block;width:max-content;max-width:100%;overflow-x:auto;margin:1rem 0;font-size:.9rem}
+.prose th,.prose td{padding:.4rem .75rem;border:1px solid var(--line-strong);text-align:left}
+.prose th{font-weight:600;color:var(--text-0);background:color-mix(in srgb,var(--surface-2) 70%,transparent)}
+.prose tr:nth-child(even) td{background:color-mix(in srgb,var(--surface-1) 55%,transparent)}
+.prose blockquote{margin:1rem 0;padding:.05rem 1rem;border-left:3px solid var(--line-strong);background:color-mix(in srgb,var(--surface-1) 55%,transparent);border-radius:0 8px 8px 0;color:var(--text-1)}
 .module{margin:1.8rem 0 2.8rem}
 /* footer */
 .site-foot{border-top:1px solid var(--line);padding-block:2.6rem 3rem}

@@ -16,8 +16,12 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.9.14",
     "@cloudflare/workers-types": "^4.20251011.0",
+    "@types/markdown-it": "^14.1.2",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4",
     "wrangler": "~4.112.0"
+  },
+  "dependencies": {
+    "markdown-it": "^14.3.0"
   }
 }

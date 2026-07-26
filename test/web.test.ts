@@ -136,6 +136,37 @@ const NOETA_README = [
   "```",
 ].join("\n");
 
+// A README exercising what markdown-it brought over the old hand-rolled renderer: a GFM table with
+// per-column alignment (the para/p2p README shape that used to render as literal pipes), ordered +
+// nested lists, a blockquote carrying a ```noeta fence (highlighting + copy button must survive the
+// nesting), raw HTML payloads that must land escaped/inert, and a javascript: link that must be
+// refused.
+const GFM_README = [
+  "# gfm",
+  "",
+  "| Feature | Status | Notes |",
+  "|:--------|:------:|------:|",
+  "| tables | yes | GFM |",
+  "| lists | yes | nested |",
+  "",
+  "1. first",
+  "2. second",
+  "   - nested a",
+  "   - nested b",
+  "",
+  "> A quoted warning with `code`.",
+  ">",
+  "> ```noeta",
+  "> fn greet() {}",
+  "> ```",
+  "",
+  "<script>alert(9)</script>",
+  "",
+  '<img src=x onerror="alert(10)">',
+  "",
+  "[evil](javascript:alert(11)) and [fine](https://noeta.dev/docs).",
+].join("\n");
+
 // The sidebar install command, as the server highlights it: the command word tok-fn, `--flags`
 // tok-kw, values (and the shell continuations) plain.
 const INSTALL_HTML =
@@ -163,6 +194,8 @@ beforeAll(async () => {
   expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
   await post("/packages/acme/codey", { version: "0.1.0", url: "https://github.com/acme/codey", tag: "v0.1.0", sha: "bbb" }, TOKEN);
   expect((await putText("/packages/acme/codey/readme/0.1.0", NOETA_README, TOKEN)).status).toBe(200);
+  await post("/packages/acme/gfm", { version: "0.1.0", url: "https://github.com/acme/gfm", tag: "v0.1.0", sha: "abc" }, TOKEN);
+  expect((await putText("/packages/acme/gfm/readme/0.1.0", GFM_README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
   expect((await putText("/packages/acme/std/docs/1.0.0", API_DOCS, TOKEN)).status).toBe(200);
   // Two tagged packages, to prove a keyword listing groups rather than just echoing one row.
@@ -582,6 +615,53 @@ describe("toml syntax highlighting", () => {
     );
     // The rust fence keeps the plain escaped rendering — no token spans.
     expect(body).toContain(`<pre><code>fn main() { println!(&quot;hi&quot;) }</code></pre>`);
+  });
+});
+
+describe("markdown-it rendering (GFM)", () => {
+  it("renders a GFM table as a real <table> with per-column alignment", async () => {
+    const body = await (await web("/acme/gfm")).text();
+    expect(body).toContain("<table>");
+    expect(body).toContain('<th style="text-align:left">Feature</th>');
+    expect(body).toContain('<th style="text-align:center">Status</th>');
+    expect(body).toContain('<th style="text-align:right">Notes</th>');
+    expect(body).toContain('<td style="text-align:center">yes</td>');
+    // The old renderer's failure mode — literal pipes in a paragraph — is gone.
+    expect(body).not.toContain("<p>| Feature | Status | Notes |");
+  });
+
+  it("renders ordered and nested lists", async () => {
+    const body = await (await web("/acme/gfm")).text();
+    expect(body).toContain("<ol>");
+    expect(body).toContain("<li>first</li>");
+    // The unordered list nests inside the second ordered item.
+    expect(body).toMatch(/<li>second\s*<ul>\s*<li>nested a<\/li>\s*<li>nested b<\/li>\s*<\/ul>\s*<\/li>/);
+  });
+
+  it("renders a blockquote, and a noeta fence inside it keeps highlighting + copy button", async () => {
+    const body = await (await web("/acme/gfm")).text();
+    const quote = body.match(/<blockquote>([\s\S]*?)<\/blockquote>/);
+    expect(quote).not.toBeNull();
+    expect(quote![1]).toContain("A quoted warning with <code>code</code>.");
+    // The fence inside the quote still routes through the highlighter and the .snippet wrapper.
+    expect(quote![1]).toContain(
+      `<div class="snippet"><pre class="noeta-code"><code><span class="tok-kw">fn</span> <span class="tok-fn">greet</span>() {}</code></pre>`,
+    );
+    expect(quote![1]).toContain('class="copy-btn"');
+  });
+
+  it("renders raw HTML in a README as escaped text, never markup (html: false)", async () => {
+    const body = await (await web("/acme/gfm")).text();
+    expect(body).not.toContain("<script>alert(9)");
+    expect(body).toContain("&lt;script&gt;alert(9)&lt;/script&gt;");
+    expect(body).not.toContain("<img");
+    expect(body).toContain("&lt;img src=x onerror=");
+  });
+
+  it("refuses a javascript: link while a https link renders with rel", async () => {
+    const body = await (await web("/acme/gfm")).text();
+    expect(body).not.toContain('href="javascript:');
+    expect(body).toContain('<a href="https://noeta.dev/docs" rel="nofollow noopener">fine</a>');
   });
 });
 
