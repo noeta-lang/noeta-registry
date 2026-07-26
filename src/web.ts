@@ -12,6 +12,7 @@
 // malicious `docs.json` cannot inject script.
 
 import type { Env } from "./index";
+import { highlightNoeta } from "./highlight";
 import { satisfies } from "./semver";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -462,7 +463,7 @@ function renderDecl(modId: string, d: DocsDecl, query: string): string {
   // collide across the by-module API reference.
   return `<section class="decl" id="${modId}--${slug(d.name!)}" data-text="${esc(declText(d))}"${hidden}>
     <h3><span class="kind">${esc(d.kind!)}</span> <code>${esc(d.name!)}</code></h3>
-    ${d.signature ? `<pre class="sig"><code>${esc(d.signature)}</code></pre>` : ""}
+    ${d.signature ? `<pre class="sig"><code>${highlightNoeta(d.signature)}</code></pre>` : ""}
     ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
   </section>`;
 }
@@ -860,11 +861,16 @@ function slug(s: string): string {
  * then apply block + inline formatting on the escaped text — Markdown's syntax characters
  * (`# * ` [ ] ( ) -`) survive HTML escaping, so parsing after escaping is sound and injection-proof.
  * Supports: fenced code, ATX headings, unordered lists, paragraphs; inline code, bold, italic, and
- * scheme-sanitized links.
+ * scheme-sanitized links. The one deliberate exception to "walk escaped text": a ```noeta fence's
+ * body is taken from the RAW lines, because highlightNoeta() escapes internally — every emitted
+ * path still escapes exactly once.
  */
 function md(input: string): string {
-  const escaped = esc(input);
-  const lines = escaped.split("\n");
+  // Escaped and raw lines in lockstep: esc() never touches "\n", so index i addresses the same
+  // source line in both arrays. The raw lines exist solely for fenced Noeta code — the highlighter
+  // escapes internally, so it must receive RAW text (pre-escaped lines would double-escape).
+  const rawLines = input.split("\n");
+  const lines = esc(input).split("\n");
   const out: string[] = [];
   let i = 0;
   let para: string[] = [];
@@ -876,17 +882,25 @@ function md(input: string): string {
   };
   while (i < lines.length) {
     const line = lines[i];
-    // Fenced code block.
+    // Fenced code block. A `noeta`/`noe` info-string routes the RAW body through the syntax
+    // highlighter (which escapes internally); every other fence keeps the plain escaped rendering.
     if (line.trimStart().startsWith("```")) {
       flushPara();
+      const info = line.trimStart().slice(3).trim();
       const code: string[] = [];
+      const raw: string[] = [];
       i++;
       while (i < lines.length && !lines[i].trimStart().startsWith("```")) {
         code.push(lines[i]);
+        raw.push(rawLines[i]);
         i++;
       }
       i++; // consume closing fence
-      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      out.push(
+        info === "noeta" || info === "noe"
+          ? `<pre class="noeta-code"><code>${highlightNoeta(raw.join("\n"))}</code></pre>`
+          : `<pre><code>${code.join("\n")}</code></pre>`,
+      );
       continue;
     }
     // ATX heading — offset by +2 so a doc `#` nests under the page's h1/h2 as an h3.
@@ -1010,7 +1024,7 @@ function layout(title: string, body: string, variant: "" | "wide" = "", extraScr
 --text-0:#e8ebef;--text-1:#a3adba;--text-2:#69727e;
 --accent:#4f8ff7;--accent-bright:#7aa9ff;--accent-dim:rgba(79,143,247,.14);
 --accent-2:#4fe0a8;--accent-2-bright:#7defc0;--danger:#e5766a;
---syn-string:#8fd6a0;--syn-number:#e0a878;
+--syn-string:#8fd6a0;--syn-number:#e0a878;--syn-keyword:#5fe0b0;--syn-type:#8fb8f5;--syn-fn:#cdd6e0;--syn-comment:#69727e;--syn-tag:#5fe0b0;--syn-hole:#7defc0;
 --line:rgba(233,237,243,.08);--line-strong:rgba(233,237,243,.14);
 --font-body:"Inter","Segoe UI",system-ui,sans-serif;
 --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -1181,6 +1195,17 @@ pre{background:color-mix(in srgb,var(--surface-1) 88%,transparent);border:1px so
 pre code,code{font-family:var(--font-mono);font-size:.86em}
 :not(pre)>code{background:var(--surface-3);border:1px solid var(--line);padding:.08em .38em;border-radius:5px;color:var(--text-0)}
 pre.sig code{color:var(--text-0)}
+/* Noeta syntax tokens — emitted by src/highlight.ts (vendored from noeta-theme); the rules and
+   variable values mirror noeta-theme/css/theme.css so registry and docs color code identically */
+.tok-kw{color:var(--syn-keyword)}
+.tok-str{color:var(--syn-string)}
+.tok-num{color:var(--syn-number)}
+.tok-type{color:var(--syn-type)}
+.tok-fn{color:var(--syn-fn)}
+.tok-tag{color:var(--syn-tag)}
+.tok-cmt{color:var(--syn-comment);font-style:italic}
+.tok-tier{color:var(--accent-2-bright)}
+.tok-hole{color:var(--syn-hole)}
 /* declarations + prose */
 .decl{margin:1.4rem 0}
 .kind{font-family:var(--font-mono);color:var(--accent-2);font-weight:500;font-size:.72em;letter-spacing:.06em;text-transform:uppercase}
@@ -1197,7 +1222,7 @@ pre.sig code{color:var(--text-0)}
 .foot-meta{width:100%;margin-top:.4rem;font-size:.84rem;color:var(--text-2)}
 /* light mode — follows the browser preference */
 @media (prefers-color-scheme:light){
-:root{--bg:#f6f8fb;--surface-1:#fff;--surface-2:#eceff5;--surface-3:#e4e8f0;--text-0:#14181f;--text-1:#47515f;--text-2:#6c7686;--accent:#2767d6;--accent-bright:#1a55c0;--accent-dim:rgba(39,103,214,.1);--accent-2:#0c8a66;--accent-2-bright:#097053;--danger:#cf3b2f;--syn-string:#3f8f4f;--syn-number:#b5651d;--line:rgba(20,24,31,.1);--line-strong:rgba(20,24,31,.16);color-scheme:light}
+:root{--bg:#f6f8fb;--surface-1:#fff;--surface-2:#eceff5;--surface-3:#e4e8f0;--text-0:#14181f;--text-1:#47515f;--text-2:#6c7686;--accent:#2767d6;--accent-bright:#1a55c0;--accent-dim:rgba(39,103,214,.1);--accent-2:#0c8a66;--accent-2-bright:#097053;--danger:#cf3b2f;--syn-string:#3f8f4f;--syn-number:#b5651d;--syn-keyword:#0c8a66;--syn-type:#2767d6;--syn-fn:#384657;--syn-comment:#8a94a4;--syn-tag:#0c8a66;--syn-hole:#097053;--line:rgba(20,24,31,.1);--line-strong:rgba(20,24,31,.16);color-scheme:light}
 .field{background:radial-gradient(58rem 40rem at 84% -12%,rgba(39,103,214,.07),transparent 60%),radial-gradient(52rem 40rem at -6% 108%,rgba(12,138,102,.05),transparent 58%),var(--bg)}
 .field::after{opacity:.012}
 ::selection{background:rgba(39,103,214,.18);color:var(--text-0)}

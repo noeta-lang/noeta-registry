@@ -1,5 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { highlightNoeta } from "../src/highlight";
 
 const ADMIN = "test-admin-token"; // matches vitest.config.ts miniflare bindings
 const TOKEN = "acme-publish-token-abc123";
@@ -82,6 +83,52 @@ const README =
 
 const LATEST_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
 
+// A Noeta snippet exercising every token class the highlighter emits: comment, tier, keyword,
+// function, type, number, string, interpolation hole, and markup tag — plus a bare `<` and `"`
+// (the double-escape tripwires).
+const NOETA_SNIPPET = [
+  "// greet builds a card",
+  "@html",
+  "fn greet(name: string): Result {",
+  '  if count < 2 { return "hi ${name}" }',
+  "  <p>done</p>",
+  "}",
+].join("\n");
+
+// The exact spans highlightNoeta must emit for NOETA_SNIPPET — pinned verbatim as the drift
+// tripwire against the canonical copy in noeta-theme/js/highlight.js: if either copy's rules
+// change, this fails before the sites diverge visually.
+const NOETA_SNIPPET_HTML = [
+  '<span class="tok-cmt">// greet builds a card</span>',
+  '<span class="tok-tier">@html</span>',
+  '<span class="tok-kw">fn</span> <span class="tok-fn">greet</span>(name: string): <span class="tok-type">Result</span> {',
+  '  <span class="tok-kw">if</span> count &lt; <span class="tok-num">2</span> { <span class="tok-kw">return</span> ' +
+    '<span class="tok-str">&quot;hi <span class="tok-hole">${name}</span>&quot;</span> }',
+  '  <span class="tok-tag">&lt;p&gt;</span>done<span class="tok-tag">&lt;/p&gt;</span>',
+  "}",
+].join("\n");
+
+// A README whose fenced code exercises the server-side highlighter end to end: a ```noeta fence
+// (raw `<`, `"`, and `${…}` must land escaped exactly once), a ```rust fence that must keep the
+// plain escaped rendering, and a ```noe fence that tries to break out of the <code> element.
+const NOETA_README = [
+  "# codey",
+  "",
+  "Highlighting fixture.",
+  "",
+  "```noeta",
+  NOETA_SNIPPET,
+  "```",
+  "",
+  "```rust",
+  'fn main() { println!("hi") }',
+  "```",
+  "",
+  "```noe",
+  "</code><script>alert(3)</script>",
+  "```",
+].join("\n");
+
 beforeAll(async () => {
   expect((await post("/scopes", { scope: "acme", token: TOKEN }, ADMIN)).status).toBe(201);
   await post("/packages/acme/greeter", { version: "1.0.0", url: "https://github.com/acme/greeter", tag: "v1.0.0", sha: "aaa" }, TOKEN);
@@ -89,6 +136,8 @@ beforeAll(async () => {
   await post("/packages/acme/greeter", { version: "1.1.0", url: "https://github.com/acme/greeter", tag: "v1.1.0", sha: LATEST_SHA, license: "MIT OR Apache-2.0" }, TOKEN);
   expect((await putText("/packages/acme/greeter/docs/1.1.0", DOCS, TOKEN)).status).toBe(200);
   expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
+  await post("/packages/acme/codey", { version: "0.1.0", url: "https://github.com/acme/codey", tag: "v0.1.0", sha: "bbb" }, TOKEN);
+  expect((await putText("/packages/acme/codey/readme/0.1.0", NOETA_README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
   expect((await putText("/packages/acme/std/docs/1.0.0", API_DOCS, TOKEN)).status).toBe(200);
   // Two tagged packages, to prove a keyword listing groups rather than just echoing one row.
@@ -346,7 +395,12 @@ describe("registry web UI", () => {
   it("renders documentation from the stored docs.json", async () => {
     const body = await (await web("/acme/greeter/1.1.0/docs")).text();
     expect(body).toContain("greeter.lib"); // module heading
-    expect(body).toContain("pub fn greet(who: string): string"); // signature code block
+    // The signature block is Noeta code, so it renders highlighted; the plain text still rides
+    // the decl's data-text attribute for the search filter.
+    expect(body).toContain(
+      `<pre class="sig"><code>pub <span class="tok-kw">fn</span> <span class="tok-fn">greet</span>(who: string): string</code></pre>`,
+    );
+    expect(body).toContain("pub fn greet(who: string): string"); // data-text (search filter)
     expect(body).toContain("<strong>greetings</strong>"); // markdown bold rendered
     expect(body).toContain("<code>greet</code>"); // the decl name
     expect(body).toContain("step 2 of the flow"); // a bare number survives code-span restore
@@ -415,5 +469,47 @@ describe("registry web UI", () => {
   it("rejects a non-GET on a web path", async () => {
     const r = await SELF.fetch("https://registry.test/acme/greeter", { method: "DELETE" });
     expect(r.status).toBe(405);
+  });
+});
+
+describe("noeta syntax highlighting", () => {
+  it("highlights a known snippet into the exact token spans (drift tripwire vs noeta-theme)", () => {
+    expect(highlightNoeta(NOETA_SNIPPET)).toBe(NOETA_SNIPPET_HTML);
+  });
+
+  it("renders a ```noeta fence highlighted, with every entity escaped exactly once", async () => {
+    const body = await (await web("/acme/codey")).text();
+    // The fence body is threaded to the highlighter RAW, so the page carries the exact spans the
+    // unit test pins — including the single-escaped `<`, `"`, and the `${…}` hole.
+    expect(body).toContain(`<pre class="noeta-code"><code>${NOETA_SNIPPET_HTML}</code></pre>`);
+    // Double-escape tripwires: a pre-escaped line fed to the (internally escaping) highlighter
+    // would produce these.
+    expect(body).not.toContain("&amp;lt;");
+    expect(body).not.toContain("&amp;quot;");
+    expect(body).not.toContain("&amp;amp;");
+  });
+
+  it("keeps every other language fence on the plain escaped rendering", async () => {
+    const body = await (await web("/acme/codey")).text();
+    expect(body).toContain(`<pre><code>fn main() { println!(&quot;hi&quot;) }</code></pre>`);
+    // The greeter README's ```sh install fence stays plain too.
+    const greeter = await (await web("/acme/greeter")).text();
+    expect(greeter).toContain(`<pre><code>noeta add acme/greeter</code></pre>`);
+    expect(greeter).not.toContain(`noeta-code"><code>noeta add`);
+  });
+
+  it("renders a /docs signature with token spans", async () => {
+    const body = await (await web("/acme/std/1.0.0/docs")).text();
+    expect(body).toContain(
+      `<pre class="sig"><code><span class="tok-kw">fn</span> <span class="tok-fn">sqrt</span>(float): float</code></pre>`,
+    );
+  });
+
+  it("keeps a hostile noeta fence inert — the payload cannot leave the code element", async () => {
+    const body = await (await web("/acme/codey")).text();
+    expect(body).not.toContain("</code><script>");
+    expect(body).not.toContain("<script>alert(3)");
+    // The payload is present, but escaped inside token spans.
+    expect(body).toContain(`<span class="tok-tag">&lt;/code&gt;</span><span class="tok-tag">&lt;script&gt;</span>`);
   });
 });
