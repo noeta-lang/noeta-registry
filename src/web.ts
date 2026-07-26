@@ -1039,7 +1039,10 @@ body.wide{--page-max:76rem}
 .site-head .wrap{display:flex;align-items:center;justify-content:space-between;height:3.75rem}
 .wordmark{font-family:var(--font-body);font-size:1.2rem;font-weight:620;letter-spacing:-.02em;color:var(--text-0)}
 .wordmark .tld{color:var(--text-2);font-weight:500}
-.site-nav{display:flex;gap:clamp(1rem,3vw,1.9rem);align-items:center;font-family:var(--font-mono);font-size:.82rem}
+/* flex-wrap: the header .wrap wraps at 38rem, but the nav itself is one flex
+ * line and its links overrun a 320px viewport. Kept in lockstep with
+ * noeta-theme/css/theme.css. */
+.site-nav{display:flex;flex-wrap:wrap;gap:.35rem clamp(1rem,3vw,1.9rem);align-items:center;font-family:var(--font-mono);font-size:.82rem}
 .site-nav a{color:var(--text-1);transition:color 160ms ease}.site-nav a:hover{color:var(--accent-bright)}
 @media (max-width:38rem){.site-head .wrap{height:auto;flex-wrap:wrap;gap:.1rem 1rem;padding-block:.7rem}}
 /* main */
