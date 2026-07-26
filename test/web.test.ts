@@ -245,15 +245,17 @@ describe("registry web UI", () => {
 
   it("pins every served script in the CSP by its real hash", async () => {
     // Inline scripts are allowed only when pinned by SHA-256 — the anti-XSS property holds only if
-    // every script the page serves has its hash in the CSP. The docs tab serves two (copy + docs
-    // search); recompute both from the served bytes and require each in script-src, so editing a
-    // script without updating its hash (or vice versa) fails here.
+    // every script the page serves has its hash in the CSP. The docs tab serves three (copy, the
+    // shared chrome drawer, and docs search); recompute each from the served bytes and require it
+    // in script-src, so editing a script without updating its hash (or vice versa) fails here.
+    // The drawer's source lives in @noeta/theme, so this is also what catches a chrome change
+    // landing in the sibling repo without a matching hash bump here.
     const sha256 = async (s: string) =>
       "sha256-" + btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))));
     const r = await web("/acme/greeter/1.1.0/docs");
     const body = await r.text();
     const scripts = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-    expect(scripts.length, "the docs tab serves the copy and docs-search scripts").toBe(2);
+    expect(scripts.length, "the docs tab serves the copy, drawer and docs-search scripts").toBe(3);
     const csp = r.headers.get("content-security-policy") ?? "";
     for (const s of scripts) expect(csp).toContain(`'${await sha256(s)}'`);
     // Hash sources only, never a blanket allowance.

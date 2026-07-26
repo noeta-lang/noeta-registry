@@ -13,6 +13,7 @@
 // in depth, and the XSS suite in web.test.ts pins the behavior.
 
 import MarkdownIt from "markdown-it";
+import { renderHeader, renderFooter, DRAWER_SCRIPT } from "@noeta/theme/chrome";
 import type { Env } from "./index";
 import { highlightNoeta } from "./highlight";
 import { highlightToml } from "./highlight-toml";
@@ -47,6 +48,15 @@ const DOCSEARCH_SCRIPT =
   `(function(){var i=document.getElementById("docsearch");var r=document.getElementById("docs-results");if(!i||!r)return;var c=document.getElementById("docsearch-count");var s=r.querySelector(".docsearch-summary");if(s)s.hidden=true;if(i.form)i.form.addEventListener("submit",function(e){e.preventDefault()});function run(){var q=i.value.trim().toLowerCase();r.classList.toggle("searching",q.length>0);var n=0;r.querySelectorAll(".module").forEach(function(m){var v=0;m.querySelectorAll(".decl").forEach(function(d){var hit=!q||(d.getAttribute("data-text")||"").indexOf(q)>=0;d.hidden=!hit;if(hit)v++});m.hidden=q.length>0&&v===0;n+=v});if(c)c.textContent=q?n+" match"+(n===1?"":"es"):""}i.addEventListener("input",run);run()})();`;
 /** SHA-256 of DOCSEARCH_SCRIPT, as a CSP `script-src` hash source. */
 const DOCSEARCH_SCRIPT_HASH = "sha256-SQJFu6r3AoXLtZBO+fqEnWeBG/t+1UiIifug/+Z1xM0=";
+
+/**
+ * SHA-256 of @noeta/theme's DRAWER_SCRIPT, which folds the header nav into a modal drawer on
+ * phones. Unlike the two above, the source lives in another repo — so editing the drawer in
+ * noeta-theme breaks this hash and the web.test.ts check fails here, blocking the deploy until the
+ * hash is refreshed. That is the intended failure mode: fail closed rather than ship a CSP that
+ * silently blocks the menu.
+ */
+const DRAWER_SCRIPT_HASH = "sha256-f/5zU/J7yGQ1JxzE9MIyADKzzBB5jmUkeTCMdnzN0+Q=";
 
 /** The package page's sections. Each is its own URL: the CSP forbids scripts, so "tabs" are links. */
 const TABS = ["readme", "docs", "versions", "deps", "security"] as const;
@@ -980,7 +990,8 @@ function html(body: string, status = 200): Response {
       // `data:` in img-src is for the `.field` grain texture (an inline SVG background) — without it
       // the atmospheric noise is silently blocked.
       "content-security-policy":
-        `default-src 'none'; script-src '${COPY_SCRIPT_HASH}' '${DOCSEARCH_SCRIPT_HASH}'; ` +
+        `default-src 'none'; script-src '${COPY_SCRIPT_HASH}' '${DOCSEARCH_SCRIPT_HASH}' ` +
+        `'${DRAWER_SCRIPT_HASH}'; ` +
         "style-src 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src https://fonts.gstatic.com; img-src https: data:",
     },
@@ -988,11 +999,17 @@ function html(body: string, status = 200): Response {
 }
 
 /**
- * The shared page shell. The registry has no build step (it is a dependency-free Worker), so rather
- * than importing `@noeta/theme` the way the Astro sites do, its tokens + chrome are inlined here —
- * the same "Signal" design language as noeta.dev, docs, and the playground: a cool slate theme with
- * a blue human accent and a mint machine accent, the atmospheric `.field` backdrop, a paper light
- * mode that follows the browser preference, and the Inter / JetBrains Mono pair from Google Fonts.
+ * The shared page shell — the same "Signal" design language as noeta.dev, docs, and the playground:
+ * a cool slate theme with a blue human accent and a mint machine accent, the atmospheric `.field`
+ * backdrop, a paper light mode that follows the browser preference, and the Inter / JetBrains Mono
+ * pair from Google Fonts.
+ *
+ * The header and footer *markup* comes from `@noeta/theme/chrome`, so the registry cannot drift
+ * from the other three properties the way it had (it was missing the version pill and the .brand
+ * wrapper entirely). The *stylesheet* is still inlined below: the Worker serves one self-contained
+ * HTML document with no asset pipeline to emit a .css file from, so the chrome CSS is duplicated
+ * here and has to be kept in lockstep with noeta-theme/css/theme.css by hand — the same rule
+ * highlight.ts already documents.
  */
 function layout(title: string, body: string, variant: "" | "wide" = "", extraScript = ""): string {
   // `--page-max` drives the header, footer, AND page container together, so the chrome always spans
@@ -1043,8 +1060,25 @@ body.wide{--page-max:76rem}
  * line and its links overrun a 320px viewport. Kept in lockstep with
  * noeta-theme/css/theme.css. */
 .site-nav{display:flex;flex-wrap:wrap;gap:.35rem clamp(1rem,3vw,1.9rem);align-items:center;font-family:var(--font-mono);font-size:.82rem}
-.site-nav a{color:var(--text-1);transition:color 160ms ease}.site-nav a:hover{color:var(--accent-bright)}
+.site-nav a{color:var(--text-1);transition:color 160ms ease;padding-block:.6rem}.site-nav a:hover{color:var(--accent-bright)}
 @media (max-width:38rem){.site-head .wrap{height:auto;flex-wrap:wrap;gap:.1rem 1rem;padding-block:.7rem}}
+/* header drawer — below 38rem the nav folds into a modal drawer. The toggle stays hidden until
+   DRAWER_SCRIPT marks the document enhanced, so with JS off the nav simply wraps. Lockstep with
+   noeta-theme/css/theme.css. */
+.drawer-toggle{display:none;width:44px;height:44px;align-items:center;justify-content:center;margin-right:-.6rem;padding:0;border:0;border-radius:8px;background:none;color:var(--text-1);cursor:pointer}
+.drawer-toggle svg{width:22px;height:22px;stroke-width:1.7}
+.drawer-toggle:hover{color:var(--accent-bright)}
+@media (max-width:38rem){:root[data-chrome-enhanced] .site-head .site-nav{display:none}:root[data-chrome-enhanced] .drawer-toggle{display:inline-flex}}
+.site-drawer{width:min(20rem,86vw);max-width:none;height:100%;max-height:none;margin:0 0 0 auto;padding:0;border:0;border-left:1px solid var(--line-strong);background:var(--surface-1);color:var(--text-0)}
+.site-drawer::backdrop{background:rgba(6,8,11,.62);backdrop-filter:blur(3px)}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;padding:.85rem .85rem .85rem 1.15rem;border-bottom:1px solid var(--line)}
+.drawer-title{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-2)}
+.drawer-close{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;border:0;border-radius:8px;background:none;color:var(--text-1);cursor:pointer}
+.drawer-close svg{width:20px;height:20px;stroke-width:1.7}
+.drawer-body{height:calc(100% - 3.9rem);padding:.6rem .75rem 1.5rem;overflow-y:auto;overscroll-behavior:contain}
+.drawer-nav{display:flex;flex-direction:column;gap:0;font-family:var(--font-mono);font-size:.9rem}
+.drawer-nav a{display:flex;align-items:center;min-height:44px;padding:0 .5rem;border-radius:7px;color:var(--text-0)}
+.drawer-nav a:hover{background:var(--surface-2);color:var(--accent-bright)}
 /* main */
 .page{max-width:var(--page-max);margin-inline:auto;padding:clamp(2rem,5vh,3.25rem) clamp(1.25rem,4vw,2.5rem) 5rem}
 .eyebrow{display:inline-flex;align-items:center;gap:.55rem;font-family:var(--font-mono);font-size:.75rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);font-weight:500;margin-bottom:.5rem}
@@ -1118,12 +1152,13 @@ ul.keywords li{padding:0}
 .copy-btn[data-copied] .ic-check{display:block}
 @media (prefers-reduced-motion:reduce){.copy-btn{transition:none}}
 .side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
-/* Single column below 52rem. The column must be minmax(0,1fr): a bare 1fr keeps
+/* Single column below 56rem (the shared --bp-stack; this used to fold at 52rem, out of step with
+ * the docs and playground layouts). The column must be minmax(0,1fr): a bare 1fr keeps
  * min-width:auto, so it floors at the sidebar's min-content — and .side-kv can't
  * shrink past its two columns, which pinned every package page ~379px wide and
  * bled past the viewport. min-width:0 plus a fixed table layout lets the
  * metadata values wrap instead of setting the floor. */
-@media (max-width:52rem){.pkg-grid{grid-template-columns:minmax(0,1fr)}.pkg-side{position:static;order:-1;min-width:0}.side-kv{width:100%;table-layout:fixed}.side-kv td{overflow-wrap:anywhere}}
+@media (max-width:56rem){.pkg-grid{grid-template-columns:minmax(0,1fr)}.pkg-side{position:static;order:-1;min-width:0}.side-kv{width:100%;table-layout:fixed}.side-kv td{overflow-wrap:anywhere}}
 /* advisories */
 .advisory{border:1px solid var(--line);border-radius:var(--radius);padding:1rem 1.15rem;margin:0 0 1rem;background:color-mix(in srgb,var(--surface-1) 55%,transparent)}
 .advisory.is-hit{border-color:color-mix(in srgb,var(--danger) 45%,var(--line-strong))}
@@ -1163,7 +1198,7 @@ ul.results{list-style:none;padding:0;margin:1.2rem 0 0}
 ul.start-links{list-style:none;padding:0;margin:1rem 0 0;display:flex;flex-direction:column;gap:.5rem}
 .page ul.start-links a{font-family:var(--font-mono);font-size:.82rem;color:var(--text-1)}
 .page ul.start-links a:hover{color:var(--accent-bright)}
-@media (max-width:52rem){.home-grid{grid-template-columns:1fr}.start-card{order:-1}}
+@media (max-width:56rem){.home-grid{grid-template-columns:minmax(0,1fr)}.start-card{order:-1}}
 /* package list */
 ul.pkglist{list-style:none;padding:0;margin:.6rem 0 0}
 ul.pkglist li{display:flex;align-items:baseline;flex-wrap:wrap;gap:.55rem;padding:.6rem .2rem;border-bottom:1px solid var(--line)}
@@ -1236,7 +1271,7 @@ pre.sig code{color:var(--text-0)}
 .site-foot .tagline{font-family:var(--font-body);font-weight:600;font-size:1.05rem;letter-spacing:-.015em}
 .site-foot .tagline em{color:var(--accent);font-style:normal}
 .foot-nav{display:flex;flex-wrap:wrap;gap:1.4rem;font-family:var(--font-mono);font-size:.84rem}
-.foot-nav a{color:var(--text-2);transition:color 160ms ease}.foot-nav a:hover{color:var(--accent-bright)}
+.foot-nav a{color:var(--text-2);transition:color 160ms ease;padding-block:.5rem}.foot-nav a:hover{color:var(--accent-bright)}
 .foot-meta{width:100%;margin-top:.4rem;font-size:.84rem;color:var(--text-2)}
 /* light mode — follows the browser preference */
 @media (prefers-color-scheme:light){
@@ -1250,33 +1285,13 @@ pre.sig code{color:var(--text-0)}
 </head>
 <body${variant ? ` class="${variant}"` : ""}>
 <div class="field" aria-hidden="true"></div>
-<header class="site-head">
-<div class="wrap">
-<a class="wordmark" href="/">noeta<span class="tld">.dev/registry</span></a>
-<nav class="site-nav" aria-label="Site">
-<a href="https://noeta.dev">noeta.dev</a>
-<a href="https://docs.noeta.dev">docs</a>
-<a href="https://play.noeta.dev">playground</a>
-<a href="https://github.com/noeta-lang/noeta">github</a>
-</nav>
-</div>
-</header>
+${renderHeader({ site: "registry" })}
 <main class="page${variant ? ` ${variant}` : ""}">
 ${body}
 </main>
-<footer class="site-foot">
-<div class="wrap">
-<span class="tagline">AI-native, <em>human-first.</em></span>
-<nav class="foot-nav" aria-label="Footer">
-<a href="https://noeta.dev">noeta.dev</a>
-<a href="https://docs.noeta.dev">docs</a>
-<a href="https://play.noeta.dev">playground</a>
-<a href="https://github.com/noeta-lang/noeta">github</a>
-</nav>
-<p class="foot-meta">Noeta is pre-alpha and built in the open — anything may change without notice.</p>
-</div>
-</footer>
+${renderFooter({ site: "registry" })}
 <script>${COPY_SCRIPT}</script>
+<script>${DRAWER_SCRIPT}</script>
 ${extraScript ? `<script>${extraScript}</script>` : ""}
 </body>
 </html>`;
