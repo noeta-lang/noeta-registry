@@ -89,23 +89,30 @@ about consistency. That is exactly the property that makes the checkpoint the ri
 
 ### How
 
-`wrangler d1 export` produces a plain SQL dump of the remote database:
+Whole-database `wrangler d1 export` **does not work here** — it refuses databases with FTS5
+virtual tables ("cannot export databases with Virtual Tables (fts5)"), and this database has
+`package_fts`. So backups are **data-only, per-table** dumps; schema always comes from
+`migrations/`. `scripts/backup-d1.sh` loops every real table with
+`wrangler d1 export --no-schema --table <t>` into a timestamped directory:
 
 ```
-wrangler d1 export noeta-registry --remote --output backups/noeta-registry-YYYYMMDDTHHMMSSZ.sql
-```
-
-`scripts/backup-d1.sh` wraps exactly that with a UTC timestamp:
-
-```
-./scripts/backup-d1.sh              # writes backups/noeta-registry-<UTC timestamp>.sql
+./scripts/backup-d1.sh              # writes backups/noeta-registry-<UTC timestamp>/<table>.sql
 ./scripts/backup-d1.sh /mnt/nas/d1  # or into a directory of your choice
 ```
 
+The table list lives in the script — keep it in sync when a migration adds a table.
+
 `backups/` is gitignored — dumps are operator artifacts, not repo content. Restore, should it ever
-come to that, is `wrangler d1 execute noeta-registry --remote --file <dump>.sql` into a **fresh**
-database — and note the transparency-log caveat above: restoring an old dump rewinds `tree_size`,
-which clients treat as equivocation. A restore is a disaster-recovery event that must ship with an
+come to that, into a **fresh** database: apply `migrations/` first (recreates every table,
+including the FTS index and its triggers), then `wrangler d1 execute noeta-registry --remote
+--file <table>.sql` for each dump, then rebuild the search index:
+
+```
+wrangler d1 execute noeta-registry --remote --command "INSERT INTO package_fts(package_fts) VALUES('rebuild')"
+```
+
+And note the transparency-log caveat above: restoring an old dump rewinds `tree_size`, which
+clients treat as equivocation. A restore is a disaster-recovery event that must ship with an
 operator advisory, not a quiet fix.
 
 ### Cadence
