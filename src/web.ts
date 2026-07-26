@@ -123,27 +123,16 @@ async function routeWeb(env: Env, parts: string[], params?: URLSearchParams): Pr
 // --- pages ---------------------------------------------------------------------------------------
 
 async function homePage(env: Env): Promise<string> {
+  // One row per package — its most recent release, with the description and keywords a listing
+  // card shows. `package_fts` is maintained by the publish path (and backfilled by migration 0012)
+  // as exactly that projection, so the home page reads it instead of deduping a `packages` scan.
   const { results } = await env.DB.prepare(
-    "SELECT name, version, published_at, license FROM packages ORDER BY published_at DESC LIMIT 200",
-  ).all<{ name: string; version: string; published_at: string; license: string | null }>();
-  // Most-recent publish per package, in publish order — its license rides along.
-  const seen = new Set<string>();
-  const recent: { name: string; version: string; license: string | null }[] = [];
-  for (const r of results ?? []) {
-    if (seen.has(r.name)) continue;
-    seen.add(r.name);
-    recent.push({ name: r.name, version: r.version, license: r.license });
-    if (recent.length >= 40) break;
-  }
+    "SELECT name, description, keywords, version, license, published_at FROM package_fts " +
+      "ORDER BY published_at DESC LIMIT 40",
+  ).all<SearchRow>();
+  const recent = results ?? [];
   const list = recent.length
-    ? `<ul class="pkglist">${recent
-        .map(
-          (r) =>
-            `<li><a href="/${esc(r.name)}">${esc(r.name)}</a> <span class="muted">${esc(r.version)}</span>${
-              r.license ? ` <span class="badge license">${esc(r.license)}</span>` : ""
-            }</li>`,
-        )
-        .join("")}</ul>`
+    ? `<ul class="results">${recent.map(renderResult).join("")}</ul>`
     : `<p class="muted">No packages published yet.</p>`;
   return layout(
     "Noeta registry",
