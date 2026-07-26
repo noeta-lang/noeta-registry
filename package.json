@@ -23,6 +23,7 @@
     "wrangler": "~4.112.0"
   },
   "dependencies": {
+    "@noeta/theme": "file:../noeta-theme",
     "markdown-it": "^14.3.0"
   }
 }

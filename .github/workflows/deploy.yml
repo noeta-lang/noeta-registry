@@ -2,11 +2,16 @@ name: Build and deploy
 
 # Push to main → run the test suite, apply D1 migrations to production, then deploy the Worker.
 #
-# The registry is a dependency-free Cloudflare Worker (no build step, no @noeta/theme — it inlines
-# its own Signal tokens). Migrations run BEFORE deploy so new code never meets an old schema;
-# `wrangler d1 migrations apply` is idempotent (it tracks applied files in d1_migrations), so
-# re-running every push is safe. Keep migrations additive so a deploy that fails after a successful
-# migration leaves the previous Worker version compatible.
+# The registry still ships as one self-contained Worker with no asset pipeline, but its header and
+# footer markup now comes from @noeta/theme so the four properties cannot drift apart. That is a
+# sibling-checkout file: dependency ("@noeta/theme": "file:../noeta-theme"), so the Worker is
+# checked out into site/ with the theme cloned next to it — the same shape as local disk, and the
+# same shape the landing/docs/playground workflows already use.
+#
+# Migrations run BEFORE deploy so new code never meets an old schema; `wrangler d1 migrations apply`
+# is idempotent (it tracks applied files in d1_migrations), so re-running every push is safe. Keep
+# migrations additive so a deploy that fails after a successful migration leaves the previous Worker
+# version compatible.
 on:
   push:
     branches: [main]
@@ -16,26 +21,45 @@ concurrency:
   group: deploy
   cancel-in-progress: true
 
+defaults:
+  run:
+    working-directory: site
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout registry
+        uses: actions/checkout@v6
+        with:
+          path: site
+
+      - name: Checkout @noeta/theme
+        uses: actions/checkout@v6
+        with:
+          repository: noeta-lang/noeta-theme
+          path: noeta-theme
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v6
+        with:
+          package_json_file: site/package.json
 
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Also the tripwire for the chrome drawer's CSP hash: the script's source lives in
+      # @noeta/theme, so a change there without a matching hash bump in web.ts fails here rather
+      # than shipping a page whose menu the CSP silently blocks.
       - name: Test (typecheck + suite)
         run: pnpm run test
 
@@ -44,6 +68,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site
           command: d1 migrations apply noeta-registry --remote
 
       - name: Deploy to Cloudflare Workers
@@ -51,4 +76,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: site
           command: deploy
