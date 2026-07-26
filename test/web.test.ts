@@ -261,6 +261,32 @@ describe("registry web UI", () => {
     expect(await (await web("/search?q=")).text()).toContain("Type a package name");
   });
 
+  it("a #tag token requires the keyword instead of matching it as text", async () => {
+    // `para` as free text prefix-matches the two para-keyword packages AND acme/paraext by name;
+    // `#para` requires the keyword column, so only the tagged packages qualify.
+    const tagged = await (await web("/search?q=%23para")).text();
+    expect(tagged).toContain(`href="/acme/paraext"`);
+    expect(tagged).toContain(`href="/acme/parakit"`);
+    expect(tagged).not.toContain(`href="/acme/imgfx"`);
+
+    // A tag composes with free terms: only paraext carries the aether keyword.
+    const composed = await (await web("/search?q=para%20%23aether")).text();
+    expect(composed).toContain(`href="/acme/paraext"`);
+    expect(composed).not.toContain(`href="/acme/parakit"`);
+
+    // "image" appears in imgfx's description AND keywords; requiring a keyword imgfx does not
+    // carry excludes it even though the free term would match.
+    const excluded = await (await web("/search?q=image%20%23para")).text();
+    expect(excluded).toContain("No packages match");
+
+    // A tag no package carries is an empty state, not an error; a bare `#` degrades to the prompt.
+    expect(await (await web("/search?q=%23nosuchtag")).text()).toContain("No packages match");
+    expect((await web("/search?q=%23")).status).toBe(200);
+
+    // The empty-state hint teaches the syntax.
+    expect(await (await web("/search?q=")).text()).toContain("#tag");
+  });
+
   it("never lets a search query reach FTS as a syntax error or operator", async () => {
     // Quotes, stars, and boolean operators are user text here — reduced to prefix terms, never
     // MATCH syntax. Each must return 200 (a normal results page), not a 500 from a MATCH parse error.

@@ -548,16 +548,28 @@ function renderResult(r: SearchRow): string {
 
 /**
  * `/search?q=` — global package search over the FTS index (name, description, keywords), BM25-ranked
- * with the name weighted highest. The query is reduced to alphanumeric prefix terms before it reaches
- * FTS `MATCH`, so no user input can be a MATCH operator or a syntax error.
+ * with the name weighted highest. A `#tag` token *requires* the keyword (an FTS column filter on
+ * `keywords`); everything else is a free prefix term; all constraints AND together. The query is
+ * reduced to charset-restricted tokens before it reaches FTS `MATCH`, so no user input can be a
+ * MATCH operator or a syntax error.
  *
  * `search` is a reserved scope (RESERVED_WEB_SCOPES in index.ts), so no package shadows this route.
  */
 async function searchPage(env: Env, rawQuery: string): Promise<Page> {
-  // unicode61 splits on non-alphanumerics anyway; reducing to `[a-z0-9]+` terms here means the MATCH
-  // string is only barewords + prefix stars — never a stray quote, `*`, or an AND/OR/NOT operator.
-  const terms = (rawQuery.toLowerCase().match(/[a-z0-9]+/g) ?? []).slice(0, 8);
-  const match = terms.map((t) => `${t}*`).join(" ");
+  // `#tag` uses the keyword charset (`[a-z0-9-]+`, the shape publishes validate), rendered as a
+  // quoted phrase with `-` split into words — unicode61 tokenizes a stored `foo-bar` as two
+  // adjacent tokens, so the phrase matches exactly the stored keyword. Free terms are reduced to
+  // `[a-z0-9]+` prefix stars. Both constructions admit only barewords, quotes we emit ourselves,
+  // and a `keywords:` column filter we spell ourselves — never a user-supplied MATCH operator.
+  const lower = rawQuery.toLowerCase();
+  const tags = (lower.match(/#[a-z0-9-]+/g) ?? [])
+    .map((t) => t.slice(1).replace(/^-+|-+$/g, ""))
+    .filter(Boolean)
+    .slice(0, 4);
+  const freeText = lower.replace(/#[a-z0-9-]+/g, " ");
+  const terms = (freeText.match(/[a-z0-9]+/g) ?? []).slice(0, 8);
+  const tagFilters = tags.map((t) => `keywords:"${t.split(/-+/).join(" ")}"`);
+  const match = [...terms.map((t) => `${t}*`), ...tagFilters].join(" ");
 
   const LIMIT = 50;
   let results: SearchRow[] = [];
@@ -583,7 +595,7 @@ async function searchPage(env: Env, rawQuery: string): Promise<Page> {
 
   let body: string;
   if (!match) {
-    body = `<p class="muted">Type a package name, keyword, or a word from a description.</p>`;
+    body = `<p class="muted">Type a package name, keyword, or a word from a description. <code>#tag</code> requires a keyword — e.g. <code>client #http</code>.</p>`;
   } else if (results.length === 0) {
     body = `<p class="muted">No packages match <code>${esc(rawQuery.trim())}</code>.</p>`;
   } else {
