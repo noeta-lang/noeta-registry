@@ -56,7 +56,7 @@ const DOCSEARCH_SCRIPT_HASH = "sha256-SQJFu6r3AoXLtZBO+fqEnWeBG/t+1UiIifug/+Z1xM
  * hash is refreshed. That is the intended failure mode: fail closed rather than ship a CSP that
  * silently blocks the menu.
  */
-const DRAWER_SCRIPT_HASH = "sha256-f/5zU/J7yGQ1JxzE9MIyADKzzBB5jmUkeTCMdnzN0+Q=";
+const DRAWER_SCRIPT_HASH = "sha256-8LHOGhNhtkMhCvhddIF3ai4uvhOjhKx7WeE1Y+6lHmc=";
 
 /** The package page's sections. Each is its own URL: the CSP forbids scripts, so "tabs" are links. */
 const TABS = ["readme", "docs", "versions", "deps", "security"] as const;
@@ -1068,7 +1068,9 @@ body.wide{--page-max:76rem}
 .drawer-toggle{display:none;width:44px;height:44px;align-items:center;justify-content:center;margin-right:-.6rem;padding:0;border:0;border-radius:8px;background:none;color:var(--text-1);cursor:pointer}
 .drawer-toggle svg{width:22px;height:22px;stroke-width:1.7}
 .drawer-toggle:hover{color:var(--accent-bright)}
-@media (max-width:38rem){:root[data-chrome-enhanced] .site-head .site-nav{display:none}:root[data-chrome-enhanced] .drawer-toggle{display:inline-flex}}
+/* scoped through .wrap so it cannot reach the nav copy inside the drawer, which is a sibling of
+   .wrap in the same <header> */
+@media (max-width:38rem){:root[data-chrome-enhanced] .site-head .wrap .site-nav{display:none}:root[data-chrome-enhanced] .drawer-toggle{display:inline-flex}}
 .site-drawer{width:min(20rem,86vw);max-width:none;height:100%;max-height:none;margin:0 0 0 auto;padding:0;border:0;border-left:1px solid var(--line-strong);background:var(--surface-1);color:var(--text-0)}
 .site-drawer::backdrop{background:rgba(6,8,11,.62);backdrop-filter:blur(3px)}
 .drawer-head{display:flex;align-items:center;justify-content:space-between;padding:.85rem .85rem .85rem 1.15rem;border-bottom:1px solid var(--line)}
