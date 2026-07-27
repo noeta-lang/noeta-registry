@@ -1,5 +1,8 @@
 node_modules/
 .wrangler/
+# Canonical grammars synced from the language repo (scripts/sync-grammars.mjs) — generated.
+syntaxes/
+.noeta-grammar.tmp/
 dist/
 *.log
 .dev.vars

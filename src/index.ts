@@ -10,6 +10,7 @@
 // tree of npm deps): plain routing, the Workers `crypto` for token hashing, D1 for storage.
 
 import { handleWeb } from "./web";
+import { invalidateRendered } from "./render-cache";
 import { oidcConfig, verifyOidc } from "./oidc";
 import { githubConfig, verifyGithubOwnership } from "./github";
 import { domainConfig, verifyDomainOwnership } from "./domain";
@@ -403,6 +404,8 @@ async function putDocs(
   )
     .bind(name, version, body, new Date().toISOString())
     .run();
+  // Last-wins: an overwrite must retire the web UI's cached render of the old artifact.
+  await invalidateRendered(env, name, version, "docs");
   return json({ status: "docs stored", name, version });
 }
 
@@ -456,6 +459,8 @@ async function putReadme(
   )
     .bind(name, version, body, new Date().toISOString())
     .run();
+  // Last-wins: an overwrite must retire the web UI's cached render of the old markdown.
+  await invalidateRendered(env, name, version, "readme");
   return json({ status: "readme stored", name, version });
 }
 

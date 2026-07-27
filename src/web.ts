@@ -15,8 +15,8 @@
 import MarkdownIt from "markdown-it";
 import { renderHeader, renderFooter, DRAWER_SCRIPT } from "@noeta/theme/chrome";
 import type { Env } from "./index";
-import { highlightNoeta } from "./highlight";
-import { highlightToml } from "./highlight-toml";
+import { ensureHighlighter, highlightHtml, resolveLang } from "./shiki";
+import { cachedRender } from "./render-cache";
 import { satisfies } from "./semver";
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -211,29 +211,46 @@ async function packagePage(
   const affecting = live.filter((a) => satisfies(v, a.ranges) === true);
   const deps = parseDeps(selected.deps);
 
+  // The sidebar's install/manifest snippets are shiki-highlighted and derive from (name, version)
+  // alone, so they come from the render cache too (kind "side") — they show on EVERY tab, and a
+  // cache hit here is what keeps plain versions/deps/security views off the highlighter entirely.
+  const sideSnippets =
+    (await cachedRender(env, name, v, "side", async () => {
+      await ensureHighlighter();
+      return sidebarSnippets(name, v);
+    })) ?? "";
+
   let main: string;
   switch (tab) {
     case "readme": {
       // The publisher-uploaded README (npm/crates.io model), rendered through the same escape-first
-      // markdown renderer as doc prose — publisher markdown is untrusted input.
-      const readme = await readmeMd(env, name, v);
-      main = readme
-        ? `<div class="prose readme">${md(readme)}</div>`
-        : `<p class="muted">This release has no README.</p>`;
+      // markdown renderer as doc prose — publisher markdown is untrusted input. Cached per version:
+      // the fragment derives only from the stored readme_md (last-wins uploads invalidate it).
+      const rendered = await cachedRender(env, name, v, "readme", async () => {
+        const readme = await readmeMd(env, name, v);
+        if (readme === null) return null;
+        await ensureHighlighter();
+        return `<div class="prose readme">${md(readme)}</div>`;
+      });
+      main = rendered ?? `<p class="muted">This release has no README.</p>`;
       break;
     }
     case "docs": {
-      const raw = await docsJson(env, name, v);
-      if (raw === null) {
-        return { status: 404, body: notFoundPage(`No documentation stored for ${name}@${v}.`) };
-      }
-      let doc: DocsArtifact;
-      try {
-        doc = JSON.parse(raw) as DocsArtifact;
-      } catch {
+      // Only the unqueried render is cached — a ?q= search bakes hidden-attribute filtering for
+      // that query into the markup, so it renders live.
+      const rendered =
+        query === ""
+          ? await cachedRender(env, name, v, "docs", () => renderedDocs(env, name, v, ""))
+          : await renderedDocs(env, name, v, query);
+      if (rendered === null) {
+        // Distinguish the two failure shapes: no stored artifact vs an unreadable one.
+        const raw = await docsJson(env, name, v);
+        if (raw === null) {
+          return { status: 404, body: notFoundPage(`No documentation stored for ${name}@${v}.`) };
+        }
         return { status: 500, body: notFoundPage("The stored documentation for this release is unreadable.") };
       }
-      main = docsMain(doc, name, v, query);
+      main = rendered;
       break;
     }
     case "versions":
@@ -243,6 +260,10 @@ async function packagePage(
       main = depsMain(deps);
       break;
     case "security":
+      // Advisory details are markdown and may carry fenced code; they are MUTABLE (edits,
+      // withdrawals), so this tab renders live — the highlighter is ensured up front because
+      // markdown-it's fence rule is synchronous.
+      if (live.some((a) => a.details)) await ensureHighlighter();
       main = securityMain(live, v);
       break;
   }
@@ -262,7 +283,7 @@ async function packagePage(
        ${tabBar(name, v, tab, { docs: hasDocs, versions: rows.length, deps: deps.length, affecting: affecting.length })}
        <div class="pkg-grid">
          <div class="pkg-main">${main}</div>
-         ${sidebar(name, selected, logIndex)}
+         ${sidebar(name, selected, logIndex, sideSnippets)}
        </div>`,
       "wide",
       tab === "docs" ? DOCSEARCH_SCRIPT : "",
@@ -295,12 +316,15 @@ function tabBar(
   </nav>`;
 }
 
-/** The metadata rail: what the release *is*, and how to depend on it. */
-function sidebar(name: string, r: Row, logIndex: number | null): string {
-  const provenance = r.sig ? "signed (key)" : r.bundle ? "signed (keyless)" : "unsigned";
+/**
+ * The sidebar's install-and-manifest block — the render-cached (kind "side") fragment. Derives
+ * from (name, version) ONLY: nothing mutable may ever land in here (see render-cache.ts).
+ * Requires the highlighter (the cache-miss producer awaits ensureHighlighter first).
+ */
+function sidebarSnippets(name: string, version: string): string {
   // The import root `noeta add` derives when the key is omitted: the `package` half of `company/pkg`.
   const key = name.split("/")[1];
-  const req = `^${r.version}`;
+  const req = `^${version}`;
   // Split across shell continuations rather than one long line: the rail is too narrow to show the
   // whole command, and neither truncating it (the version scrolls out of sight) nor letting it wrap
   // (line-breaking is allowed after a hyphen, so `--version` splits) is honest. This pastes as-is.
@@ -308,6 +332,16 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
   // Stays a one-line inline table: TOML 1.0 inline tables may not span lines or carry a trailing
   // comma, so the pretty multi-line form would be a snippet that doesn't parse.
   const manifest = `${key} = { version = "${req}", package = "${name}" }`;
+  return `<p class="side-note">Run this in your project directory:</p>
+    ${snippetHtml(highlightHtml(install, "shellscript"))}
+    <p class="side-note">Or add it to your <code>noeta.toml</code>:</p>
+    ${snippetHtml(highlightHtml(manifest, "toml"))}`;
+}
+
+/** The metadata rail: what the release *is*, and how to depend on it. `snippets` is the
+ *  render-cached install/manifest block from sidebarSnippets. */
+function sidebar(name: string, r: Row, logIndex: number | null, snippets: string): string {
+  const provenance = r.sig ? "signed (key)" : r.bundle ? "signed (keyless)" : "unsigned";
   return `<aside class="pkg-side">
     <h3>Metadata</h3>
     <table class="kv side-kv">
@@ -327,10 +361,7 @@ function sidebar(name: string, r: Row, logIndex: number | null): string {
     </table>
 
     <h3>Install</h3>
-    <p class="side-note">Run this in your project directory:</p>
-    ${snippetHtml(highlightInstall(install))}
-    <p class="side-note">Or add it to your <code>noeta.toml</code>:</p>
-    ${snippetHtml(highlightToml(manifest))}
+    ${snippets}
 
     <h3>Repository</h3>
     ${
@@ -349,39 +380,13 @@ const CHECK_ICON =
   `<svg class="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 
 /**
- * A copyable code block from *rendered* code HTML (already escaped, possibly carrying `tok-*`
- * spans), plus the hover-revealed copy button COPY_SCRIPT wires up. The copy payload is the
+ * A copyable code block from *rendered* code HTML (already escaped, possibly carrying shiki
+ * token spans), plus the hover-revealed copy button COPY_SCRIPT wires up. The copy payload is the
  * `<code>` element's textContent — entity-decoded, span-stripped by the browser — so a highlighted
  * block still copies as its exact raw source.
  */
 function snippetHtml(codeHtml: string, preClass = ""): string {
   return `<div class="snippet"><pre${preClass ? ` class="${preClass}"` : ""}><code>${codeHtml}</code></pre><button class="copy-btn" type="button" aria-label="Copy to clipboard">${COPY_ICON}${CHECK_ICON}</button></div>`;
-}
-
-/**
- * Minimal shell coloring for the sidebar's `noeta add …` snippet ONLY — the command word and its
- * `--flags`, values left plain. Deliberately not a shell highlighter (no quoting, no operators):
- * that honesty is why it is not applied to arbitrary ```sh fences.
- */
-function highlightInstall(cmd: string): string {
-  let first = true;
-  return cmd
-    .split("\n")
-    .map((line) =>
-      line
-        .split(/(\s+)/)
-        .map((word) => {
-          if (word === "" || /^\s+$/.test(word)) return esc(word);
-          if (first) {
-            first = false;
-            return `<span class="tok-fn">${esc(word)}</span>`;
-          }
-          if (word.startsWith("--")) return `<span class="tok-kw">${esc(word)}</span>`;
-          return esc(word);
-        })
-        .join(""),
-    )
-    .join("\n");
 }
 
 /** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
@@ -516,7 +521,7 @@ function renderDecl(modId: string, d: DocsDecl, query: string): string {
   // collide across the by-module API reference.
   return `<section class="decl" id="${modId}--${slug(d.name!)}" data-text="${esc(declText(d))}"${hidden}>
     <h3><span class="kind">${esc(d.kind!)}</span> <code>${esc(d.name!)}</code></h3>
-    ${d.signature ? snippetHtml(highlightNoeta(d.signature), "sig") : ""}
+    ${d.signature ? snippetHtml(highlightHtml(d.signature, "noeta"), "sig") : ""}
     ${d.doc ? `<div class="prose">${md(d.doc)}</div>` : ""}
   </section>`;
 }
@@ -790,6 +795,22 @@ async function docsJson(env: Env, name: string, version: string): Promise<string
   return row ? row.docs_json : null;
 }
 
+/** The docs tab's main column, rendered from the stored artifact — or null when the artifact is
+ *  missing or unreadable (the caller re-checks which to pick the status). The `query === ""`
+ *  render is the cacheable one (see packagePage). */
+async function renderedDocs(env: Env, name: string, version: string, query: string): Promise<string | null> {
+  const raw = await docsJson(env, name, version);
+  if (raw === null) return null;
+  let doc: DocsArtifact;
+  try {
+    doc = JSON.parse(raw) as DocsArtifact;
+  } catch {
+    return null;
+  }
+  await ensureHighlighter();
+  return docsMain(doc, name, version, query);
+}
+
 /** Every advisory naming this package, worst first. Range matching happens in the renderer, which
  *  knows which release is selected. */
 async function advisoriesFor(env: Env, name: string): Promise<AdvisoryRow[]> {
@@ -929,19 +950,26 @@ function slug(s: string): string {
 const markdown = new MarkdownIt({ html: false, linkify: false, typographer: false });
 
 /**
- * Fenced code (and, below, indented code): a `noeta`/`noe` info-string routes the RAW body through
- * the Noeta syntax highlighter and `toml` through the TOML one (both escape internally); every
- * other fence keeps the plain escaped rendering. ALL of them land in the `.snippet` wrapper, so
- * every code block gets the copy button — whose payload is the `<code>` element's textContent, so
- * a highlighted block still copies as its exact raw source (see snippetHtml).
+ * Fenced code (and, below, indented code): any info-string naming a language shiki knows
+ * (src/shiki.ts — the canonical noeta grammar, toml, rust, sql, yaml, shell, …) routes the RAW
+ * body through the highlighter; an unknown info-string keeps the plain escaped rendering. ALL of
+ * them land in the `.snippet` wrapper, so every code block gets the copy button — whose payload
+ * is the `<code>` element's textContent, which shiki's markup preserves verbatim (the source
+ * rides in text nodes; the spans only add inline colors), so a highlighted block still copies as
+ * its exact raw source (see snippetHtml).
+ *
+ * Synchronous, so the highlighter must already exist — every render path that can reach a fence
+ * awaits ensureHighlighter() first (see packagePage / cachedRender producers).
  */
 markdown.renderer.rules.fence = (tokens, idx) => {
   const token = tokens[idx];
-  const lang = token.info.trim().split(/\s+/)[0] ?? "";
+  const info = token.info.trim().split(/\s+/)[0] ?? "";
   const raw = token.content.replace(/\n$/, "");
-  if (lang === "noeta" || lang === "noe") return snippetHtml(highlightNoeta(raw), "noeta-code");
-  if (lang === "toml") return snippetHtml(highlightToml(raw), "toml-code");
-  return snippetHtml(esc(raw));
+  const lang = info ? resolveLang(info) : null;
+  if (lang === null) return snippetHtml(esc(raw));
+  // The pre class is the RESOLVED name (a value from our own registration table, never the raw
+  // info string — which is publisher input and must not reach an attribute unvetted).
+  return snippetHtml(highlightHtml(raw, lang), `${lang}-code`);
 };
 markdown.renderer.rules.code_block = (tokens, idx) => snippetHtml(esc(tokens[idx].content.replace(/\n$/, "")));
 
@@ -1008,8 +1036,7 @@ function html(body: string, status = 200): Response {
  * from the other three properties the way it had (it was missing the version pill and the .brand
  * wrapper entirely). The *stylesheet* is still inlined below: the Worker serves one self-contained
  * HTML document with no asset pipeline to emit a .css file from, so the chrome CSS is duplicated
- * here and has to be kept in lockstep with noeta-theme/css/theme.css by hand — the same rule
- * highlight.ts already documents.
+ * here and has to be kept in lockstep with noeta-theme/css/theme.css by hand.
  */
 function layout(title: string, body: string, variant: "" | "wide" = "", extraScript = ""): string {
   // `--page-max` drives the header, footer, AND page container together, so the chrome always spans
@@ -1238,17 +1265,9 @@ pre{background:color-mix(in srgb,var(--surface-1) 88%,transparent);border:1px so
 pre code,code{font-family:var(--font-mono);font-size:.86em}
 :not(pre)>code{background:var(--surface-3);border:1px solid var(--line);padding:.08em .38em;border-radius:5px;color:var(--text-0)}
 pre.sig code{color:var(--text-0)}
-/* Noeta syntax tokens — emitted by src/highlight.ts (vendored from noeta-theme); the rules and
-   variable values mirror noeta-theme/css/theme.css so registry and docs color code identically */
-.tok-kw{color:var(--syn-keyword)}
-.tok-str{color:var(--syn-string)}
-.tok-num{color:var(--syn-number)}
-.tok-type{color:var(--syn-type)}
-.tok-fn{color:var(--syn-fn)}
-.tok-tag{color:var(--syn-tag)}
-.tok-cmt{color:var(--syn-comment);font-style:italic}
-.tok-tier{color:var(--accent-2-bright)}
-.tok-hole{color:var(--syn-hole)}
+/* Syntax colors ride inline style="color:var(--syn-*)" on shiki's token spans (src/shiki.ts);
+   the --syn-* variable values above mirror noeta-theme/css/theme.css so registry and docs color
+   code identically, and they flip with prefers-color-scheme below. */
 /* declarations + prose */
 .decl{margin:1.4rem 0}
 .kind{font-family:var(--font-mono);color:var(--accent-2);font-weight:500;font-size:.72em;letter-spacing:.06em;text-transform:uppercase}

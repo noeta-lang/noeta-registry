@@ -1,7 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { highlightNoeta } from "../src/highlight";
-import { highlightToml } from "../src/highlight-toml";
+import { RENDERER_REV } from "../src/render-cache";
 
 const ADMIN = "test-admin-token"; // matches vitest.config.ts miniflare bindings
 const TOKEN = "acme-publish-token-abc123";
@@ -84,9 +83,9 @@ const README =
 
 const LATEST_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
 
-// A Noeta snippet exercising every token class the highlighter emits: comment, tier, keyword,
-// function, type, number, string, interpolation hole, and markup tag — plus a bare `<` and `"`
-// (the double-escape tripwires).
+// A Noeta snippet exercising the token classes the canonical grammar colors: comment, tier
+// directive, keyword, function, type, number, string, interpolation hole — plus a bare `<` and
+// `"` (the escape tripwires).
 const NOETA_SNIPPET = [
   "// greet builds a card",
   "@html",
@@ -96,23 +95,33 @@ const NOETA_SNIPPET = [
   "}",
 ].join("\n");
 
-// The exact spans highlightNoeta must emit for NOETA_SNIPPET — pinned verbatim as the drift
-// tripwire against the canonical copy in noeta-theme/js/highlight.js: if either copy's rules
-// change, this fails before the sites diverge visually.
+// The exact inner HTML shiki emits for NOETA_SNIPPET through the canonical noeta grammar and the
+// Ink & Signal var(--syn-*) theme (src/shiki.ts) — pinned verbatim so a grammar resync or theme
+// edit that changes tokenization fails HERE, as the reminder to bump RENDERER_REV. Shape notes:
+// one span.line per source line, newlines as real text nodes (textContent stays the raw source),
+// `<` escaped as &#x3C;, `"` left literal in text nodes (attribute-only escaping is fine there).
 const NOETA_SNIPPET_HTML = [
-  '<span class="tok-cmt">// greet builds a card</span>',
-  '<span class="tok-tier">@html</span>',
-  '<span class="tok-kw">fn</span> <span class="tok-fn">greet</span>(name: string): <span class="tok-type">Result</span> {',
-  '  <span class="tok-kw">if</span> count &lt; <span class="tok-num">2</span> { <span class="tok-kw">return</span> ' +
-    '<span class="tok-str">&quot;hi <span class="tok-hole">${name}</span>&quot;</span> }',
-  '  <span class="tok-tag">&lt;p&gt;</span>done<span class="tok-tag">&lt;/p&gt;</span>',
-  "}",
+  '<span class="line"><span style="color:var(--syn-comment);font-style:italic">// greet builds a card</span></span>',
+  '<span class="line"><span style="color:var(--accent-2-bright)">@html</span></span>',
+  '<span class="line"><span style="color:var(--syn-keyword)">fn</span><span style="color:var(--syn-fn)"> greet</span>' +
+    '<span style="color:var(--text-0)">(name: </span><span style="color:var(--syn-type)">string</span>' +
+    '<span style="color:var(--text-0)">): </span><span style="color:var(--syn-type)">Result</span>' +
+    '<span style="color:var(--text-0)"> {</span></span>',
+  '<span class="line"><span style="color:var(--syn-keyword)">  if</span><span style="color:var(--text-0)"> count &#x3C; </span>' +
+    '<span style="color:var(--syn-number)">2</span><span style="color:var(--text-0)"> { </span>' +
+    '<span style="color:var(--syn-keyword)">return</span><span style="color:var(--syn-string)"> "hi </span>' +
+    '<span style="color:var(--syn-hole)">${</span><span style="color:var(--syn-string)">name</span>' +
+    '<span style="color:var(--syn-hole)">}</span><span style="color:var(--syn-string)">"</span>' +
+    '<span style="color:var(--text-0)"> }</span></span>',
+  '<span class="line"><span style="color:var(--text-0)">  &#x3C;p>done&#x3C;/p></span></span>',
+  '<span class="line"><span style="color:var(--text-0)">}</span></span>',
 ].join("\n");
 
 // A README whose fenced code exercises the server-side highlighter end to end: a ```noeta fence
-// (raw `<`, `"`, and `${…}` must land escaped exactly once), a ```rust fence that must keep the
-// plain escaped rendering, a ```toml fence (the para READMEs' Installation sections), and a
-// ```noe fence that tries to break out of the <code> element.
+// (raw `<`, `"`, and `${…}` must land escaped exactly once), a ```rust fence (a bundled shiki
+// grammar), a ```toml fence (the para READMEs' Installation sections), a fence whose language
+// shiki does NOT know (must stay plain escaped), and a ```noe fence that tries to break out of
+// the <code> element.
 const NOETA_README = [
   "# codey",
   "",
@@ -131,8 +140,46 @@ const NOETA_README = [
   'codey = { version = "^0.1.0" }',
   "```",
   "",
+  "```zzz-unknown",
+  '<b>not & "highlighted"</b>',
+  "```",
+  "",
   "```noe",
   "</code><script>alert(3)</script>",
+  "```",
+].join("\n");
+
+// A README of fences in the bundled languages the registry registers beyond noeta/toml — plus a
+// ```console transcript (the shellsession alias) and a noeta fence whose @sql{…} tier body must
+// get REAL SQL tokens via the tier-languages injection grammar.
+const LANGS_README = [
+  "# langs",
+  "",
+  "```sql",
+  "SELECT id FROM users WHERE age > 21;",
+  "```",
+  "",
+  "```jsonc",
+  '{ "name": "x" } // trailing note',
+  "```",
+  "",
+  "```yaml",
+  "name: demo",
+  "count: 3",
+  "```",
+  "",
+  "```sh",
+  'echo "hi there"',
+  "```",
+  "",
+  "```console",
+  "$ noeta build",
+  "```",
+  "",
+  "```noeta",
+  "fn q() {",
+  "  let rows = @sql{ SELECT id FROM users WHERE age > ${min} }",
+  "}",
   "```",
 ].join("\n");
 
@@ -167,19 +214,22 @@ const GFM_README = [
   "[evil](javascript:alert(11)) and [fine](https://noeta.dev/docs).",
 ].join("\n");
 
-// The sidebar install command, as the server highlights it: the command word tok-fn, `--flags`
-// tok-kw, values (and the shell continuations) plain.
+// The sidebar install command as shiki's shellscript grammar renders it (pinned): the command
+// word colored as a function, flags/args in the grammar's argument coloring, the shell
+// continuations preserved as text so the block still pastes as-is.
 const INSTALL_HTML =
-  '<span class="tok-fn">noeta</span> add \\\n' +
-  '  <span class="tok-kw">--package</span> acme/greeter \\\n' +
-  '  <span class="tok-kw">--version</span> ^1.1.0';
+  '<span class="line"><span style="color:var(--syn-fn)">noeta</span><span style="color:var(--syn-string)"> add</span>' +
+  '<span style="color:var(--syn-string)"> \\</span></span>\n' +
+  '<span class="line"><span style="color:var(--syn-string)">  --package</span><span style="color:var(--syn-string)"> acme/greeter</span>' +
+  '<span style="color:var(--syn-string)"> \\</span></span>\n' +
+  '<span class="line"><span style="color:var(--syn-string)">  --version</span><span style="color:var(--syn-string)"> ^1.1.0</span></span>';
 
-// The sidebar's one-line TOML dependency snippet, highlighted: keys tok-type (including inside the
-// inline table), strings tok-str with entity-escaped quotes, braces plain.
+// The sidebar's one-line TOML dependency snippet through shiki's toml grammar (pinned): strings
+// colored, the quotes left literal in text nodes (shiki escapes only <, >, & there).
 const MANIFEST_HTML =
-  '<span class="tok-type">greeter</span> = { <span class="tok-type">version</span> = ' +
-  '<span class="tok-str">&quot;^1.1.0&quot;</span>, <span class="tok-type">package</span> = ' +
-  '<span class="tok-str">&quot;acme/greeter&quot;</span> }';
+  '<span class="line"><span style="color:var(--text-0)">greeter = { version = </span>' +
+  '<span style="color:var(--syn-string)">"^1.1.0"</span><span style="color:var(--text-0)">, package = </span>' +
+  '<span style="color:var(--syn-string)">"acme/greeter"</span><span style="color:var(--text-0)"> }</span></span>';
 
 // The copy button: an inline SVG clipboard (the CSP allows no external assets) that COPY_SCRIPT
 // swaps to a checkmark via [data-copied], with the accessible name on the button itself.
@@ -194,6 +244,25 @@ beforeAll(async () => {
   expect((await putText("/packages/acme/greeter/readme/1.1.0", README, TOKEN)).status).toBe(200);
   await post("/packages/acme/codey", { version: "0.1.0", url: "https://github.com/acme/codey", tag: "v0.1.0", sha: "bbb" }, TOKEN);
   expect((await putText("/packages/acme/codey/readme/0.1.0", NOETA_README, TOKEN)).status).toBe(200);
+  await post("/packages/acme/langs", { version: "0.1.0", url: "https://github.com/acme/langs", tag: "v0.1.0", sha: "bcd" }, TOKEN);
+  expect((await putText("/packages/acme/langs/readme/0.1.0", LANGS_README, TOKEN)).status).toBe(200);
+  // A README-sized document (many prose sections + fences) for the cold-render timing probe.
+  await post("/packages/acme/bigread", { version: "1.0.0", url: "https://github.com/acme/bigread", tag: "v1.0.0", sha: "cde" }, TOKEN);
+  const bigSection = [
+    "## Section",
+    "",
+    "Some prose with `code`, **bold**, and a [link](https://noeta.dev).",
+    "",
+    "```noeta",
+    NOETA_SNIPPET,
+    "```",
+    "",
+    "```rust",
+    'fn main() { println!("hi") }',
+    "```",
+    "",
+  ].join("\n");
+  expect((await putText("/packages/acme/bigread/readme/1.0.0", `# big\n\n${bigSection.repeat(30)}`, TOKEN)).status).toBe(200);
   await post("/packages/acme/gfm", { version: "0.1.0", url: "https://github.com/acme/gfm", tag: "v0.1.0", sha: "abc" }, TOKEN);
   expect((await putText("/packages/acme/gfm/readme/0.1.0", GFM_README, TOKEN)).status).toBe(200);
   await post("/packages/acme/std", { version: "1.0.0", url: "https://github.com/acme/std", tag: "v1.0.0", sha: "ccc" }, TOKEN);
@@ -443,7 +512,9 @@ describe("registry web UI", () => {
   it("renders the version's README on the package page, escaped", async () => {
     const body = await (await web("/acme/greeter")).text();
     expect(body).toContain("A <strong>friendly</strong> greeting library.");
-    expect(body).toContain("noeta add acme/greeter"); // the fenced block survives
+    // The ```sh fence survives — now shiki-highlighted (shellscript), its text in token spans.
+    expect(body).toContain(`<pre class="shellscript-code"><code>`);
+    expect(body).toContain(">noeta</span>");
     expect(body).not.toContain("<script>alert(2)</script>"); // escaped, not executable
     expect(body).toContain("&lt;script&gt;alert(2)&lt;/script&gt;");
     // 1.0.0 has no README — its page renders without one.
@@ -454,10 +525,13 @@ describe("registry web UI", () => {
   it("renders documentation from the stored docs.json", async () => {
     const body = await (await web("/acme/greeter/1.1.0/docs")).text();
     expect(body).toContain("greeter.lib"); // module heading
-    // The signature block is Noeta code, so it renders highlighted; the plain text still rides
-    // the decl's data-text attribute for the search filter.
+    // The signature block is Noeta code, so it renders through the canonical grammar; the plain
+    // text still rides the decl's data-text attribute for the search filter.
     expect(body).toContain(
-      `<pre class="sig"><code>pub <span class="tok-kw">fn</span> <span class="tok-fn">greet</span>(who: string): string</code></pre>`,
+      `<pre class="sig"><code><span class="line"><span style="color:var(--syn-keyword)">pub</span>` +
+        `<span style="color:var(--syn-keyword)"> fn</span><span style="color:var(--syn-fn)"> greet</span>` +
+        `<span style="color:var(--text-0)">(who: </span><span style="color:var(--syn-type)">string</span>` +
+        `<span style="color:var(--text-0)">): </span><span style="color:var(--syn-type)">string</span></span></code></pre>`,
     );
     expect(body).toContain("pub fn greet(who: string): string"); // data-text (search filter)
     expect(body).toContain("<strong>greetings</strong>"); // markdown bold rendered
@@ -531,36 +605,62 @@ describe("registry web UI", () => {
   });
 });
 
-describe("noeta syntax highlighting", () => {
-  it("highlights a known snippet into the exact token spans (drift tripwire vs noeta-theme)", () => {
-    expect(highlightNoeta(NOETA_SNIPPET)).toBe(NOETA_SNIPPET_HTML);
-  });
-
-  it("renders a ```noeta fence highlighted, with every entity escaped exactly once", async () => {
+describe("noeta syntax highlighting (shiki, canonical grammar)", () => {
+  it("renders a ```noeta fence into the exact pinned shiki spans, every entity escaped exactly once", async () => {
     const body = await (await web("/acme/codey")).text();
-    // The fence body is threaded to the highlighter RAW, so the page carries the exact spans the
-    // unit test pins — including the single-escaped `<`, `"`, and the `${…}` hole.
+    // The fence body is threaded to shiki RAW, so the page carries the exact pinned markup —
+    // including the single-escaped `<` and the `${…}` hole spans.
     expect(body).toContain(`<pre class="noeta-code"><code>${NOETA_SNIPPET_HTML}</code></pre>`);
-    // Double-escape tripwires: a pre-escaped line fed to the (internally escaping) highlighter
-    // would produce these.
+    // Double-escape tripwires: pre-escaped text fed back through an escaping renderer would
+    // produce these.
     expect(body).not.toContain("&amp;lt;");
     expect(body).not.toContain("&amp;quot;");
     expect(body).not.toContain("&amp;amp;");
+    expect(body).not.toContain("&amp;#x3C;");
   });
 
-  it("keeps every other language fence on the plain escaped rendering", async () => {
+  it("highlights rust, sql, jsonc, yaml, and sh fences through their bundled grammars", async () => {
+    const codey = await (await web("/acme/codey")).text();
+    // The rust fence — previously plain — now carries real rust tokens.
+    expect(codey).toContain(
+      `<pre class="rust-code"><code><span class="line"><span style="color:var(--syn-keyword)">fn</span>` +
+        `<span style="color:var(--syn-fn)"> main</span>`,
+    );
+    const langs = await (await web("/acme/langs")).text();
+    expect(langs).toContain(`<pre class="sql-code"><code>`);
+    expect(langs).toContain(`<span style="color:var(--syn-keyword)">SELECT</span>`);
+    expect(langs).toContain(`<pre class="jsonc-code"><code>`);
+    expect(langs).toMatch(/class="jsonc-code"><code>[\s\S]*?var\(--syn-comment\)[\s\S]*?\/\/ trailing note/);
+    expect(langs).toContain(`<pre class="yaml-code"><code>`);
+    expect(langs).toMatch(/class="yaml-code"><code>[\s\S]*?style="color:var\(--syn-/);
+    // `sh` resolves through the grammar's aliases to shellscript; `console` to shellsession.
+    expect(langs).toContain(`<pre class="shellscript-code"><code>`);
+    expect(langs).toContain(`<pre class="shellsession-code"><code>`);
+  });
+
+  it("keeps a fence in a language shiki does not know plain escaped", async () => {
     const body = await (await web("/acme/codey")).text();
-    expect(body).toContain(`<pre><code>fn main() { println!(&quot;hi&quot;) }</code></pre>`);
-    // The greeter README's ```sh install fence stays plain too.
-    const greeter = await (await web("/acme/greeter")).text();
-    expect(greeter).toContain(`<pre><code>noeta add acme/greeter</code></pre>`);
-    expect(greeter).not.toContain(`noeta-code"><code>noeta add`);
+    expect(body).toContain(`<pre><code>&lt;b&gt;not &amp; &quot;highlighted&quot;&lt;/b&gt;</code></pre>`);
+    expect(body).not.toContain(`zzz-unknown-code`);
   });
 
-  it("renders a /docs signature with token spans", async () => {
+  it("colors an embedded @sql tier body inside a noeta fence via the injection grammar", async () => {
+    const body = await (await web("/acme/langs")).text();
+    const block = body.match(/<pre class="noeta-code"><code>([\s\S]*?)<\/code><\/pre>/);
+    expect(block).not.toBeNull();
+    // The @sql opener carries the tier accent, and the body gets REAL SQL keyword tokens.
+    expect(block![1]).toContain(`<span style="color:var(--accent-2-bright)">@sql</span>`);
+    expect(block![1]).toContain(`<span style="color:var(--syn-keyword)">SELECT</span>`);
+    expect(block![1]).toContain(`<span style="color:var(--syn-keyword)">FROM</span>`);
+    // The ${…} hole delimiters keep the hole accent inside the tier body.
+    expect(block![1]).toContain(`<span style="color:var(--syn-hole)">\${</span>`);
+  });
+
+  it("renders a /docs signature with shiki token spans", async () => {
     const body = await (await web("/acme/std/1.0.0/docs")).text();
     expect(body).toContain(
-      `<pre class="sig"><code><span class="tok-kw">fn</span> <span class="tok-fn">sqrt</span>(float): float</code></pre>`,
+      `<pre class="sig"><code><span class="line"><span style="color:var(--syn-keyword)">fn</span>` +
+        `<span style="color:var(--syn-fn)"> sqrt</span>`,
     );
   });
 
@@ -568,55 +668,25 @@ describe("noeta syntax highlighting", () => {
     const body = await (await web("/acme/codey")).text();
     expect(body).not.toContain("</code><script>");
     expect(body).not.toContain("<script>alert(3)");
-    // The payload is present, but escaped inside token spans.
-    expect(body).toContain(`<span class="tok-tag">&lt;/code&gt;</span><span class="tok-tag">&lt;script&gt;</span>`);
+    // The payload is present, but its `<` land escaped inside shiki's text nodes.
+    expect(body).toContain("&#x3C;/code>&#x3C;script>");
   });
 });
 
 describe("toml syntax highlighting", () => {
-  it("highlights a known snippet into the exact token spans (pinned output)", () => {
-    // Header + trailing comment, an inline table with two keys, a basic string with escaped quotes
-    // and markup characters, a literal string with a backslash, numbers, and booleans.
-    const toml = [
-      "# manifest",
-      "[dependencies] # deps",
-      'greeter = { version = "^1.1.0", package = "acme/greeter" }',
-      'title = "a \\"quoted\\" <name>"',
-      "path = 'C:\\temp'",
-      "max = 42",
-      "pi = 3.14",
-      "on = true",
-      "off = false",
-    ].join("\n");
-    const expected = [
-      '<span class="tok-cmt"># manifest</span>',
-      '<span class="tok-kw">[dependencies]</span> <span class="tok-cmt"># deps</span>',
-      MANIFEST_HTML,
-      '<span class="tok-type">title</span> = <span class="tok-str">&quot;a \\&quot;quoted\\&quot; &lt;name&gt;&quot;</span>',
-      "<span class=\"tok-type\">path</span> = <span class=\"tok-str\">'C:\\temp'</span>",
-      '<span class="tok-type">max</span> = <span class="tok-num">42</span>',
-      '<span class="tok-type">pi</span> = <span class="tok-num">3.14</span>',
-      '<span class="tok-type">on</span> = <span class="tok-kw">true</span>',
-      '<span class="tok-type">off</span> = <span class="tok-kw">false</span>',
-    ].join("\n");
-    expect(highlightToml(toml)).toBe(expected);
-  });
-
-  it("carries tok spans on the sidebar install and TOML snippets", async () => {
+  it("carries the pinned shiki spans on the sidebar install and TOML snippets", async () => {
     const body = await (await web("/acme/greeter")).text();
     expect(body).toContain(INSTALL_HTML);
     expect(body).toContain(MANIFEST_HTML);
   });
 
-  it("renders a ```toml README fence highlighted while ```rust stays plain", async () => {
+  it("renders a ```toml README fence through the toml grammar", async () => {
     const body = await (await web("/acme/codey")).text();
-    expect(body).toContain(
-      `<pre class="toml-code"><code><span class="tok-kw">[dependencies]</span>\n` +
-        `<span class="tok-type">codey</span> = { <span class="tok-type">version</span> = ` +
-        `<span class="tok-str">&quot;^0.1.0&quot;</span> }</code></pre>`,
-    );
-    // The rust fence keeps the plain escaped rendering — no token spans.
-    expect(body).toContain(`<pre><code>fn main() { println!(&quot;hi&quot;) }</code></pre>`);
+    const block = body.match(/<pre class="toml-code"><code>([\s\S]*?)<\/code><\/pre>/);
+    expect(block).not.toBeNull();
+    // The version-requirement string is colored; the table header survives as text content.
+    expect(block![1]).toContain(`<span style="color:var(--syn-string)">"^0.1.0"</span>`);
+    expect(block![1].replace(/<[^>]+>/g, "")).toContain("[dependencies]");
   });
 });
 
@@ -647,7 +717,8 @@ describe("markdown-it rendering (GFM)", () => {
     expect(quote![1]).toContain("A quoted warning with <code>code</code>.");
     // The fence inside the quote still routes through the highlighter and the .snippet wrapper.
     expect(quote![1]).toContain(
-      `<div class="snippet"><pre class="noeta-code"><code><span class="tok-kw">fn</span> <span class="tok-fn">greet</span>() {}</code></pre>`,
+      `<div class="snippet"><pre class="noeta-code"><code><span class="line">` +
+        `<span style="color:var(--syn-keyword)">fn</span><span style="color:var(--syn-fn)"> greet</span>`,
     );
     expect(quote![1]).toContain('class="copy-btn"');
   });
@@ -683,13 +754,14 @@ describe("copy buttons", () => {
   });
 
   it("appears on every README fenced block and docs code block, not just the sidebar", async () => {
-    // codey's README: noeta, rust, toml, and noe fences — four blocks, plus two sidebar snippets.
+    // codey's README: noeta, rust, toml, unknown, and noe fences — five blocks, plus two sidebar
+    // snippets.
     const readme = await (await web("/acme/codey")).text();
-    expect((readme.match(/class="copy-btn"/g) || []).length).toBe(6);
+    expect((readme.match(/class="copy-btn"/g) || []).length).toBe(7);
     // Highlighted and plain fences alike sit in the .snippet wrapper the delegated script serves.
     expect(readme).toContain('<div class="snippet"><pre class="noeta-code">');
     expect(readme).toContain('<div class="snippet"><pre class="toml-code">');
-    expect(readme).toContain('<div class="snippet"><pre><code>fn main()');
+    expect(readme).toContain('<div class="snippet"><pre><code>&lt;b&gt;not');
     // Docs signature blocks get the same affordance.
     const docs = await (await web("/acme/std/1.0.0/docs")).text();
     expect(docs).toContain('<div class="snippet"><pre class="sig">');
@@ -698,17 +770,125 @@ describe("copy buttons", () => {
   it("copies the RAW code of a highlighted block — textContent round-trips exactly", async () => {
     // COPY_SCRIPT copies the <code> element's textContent. Simulate that: strip the spans and
     // decode the entities of the served noeta block; the result must be the exact raw snippet —
-    // including the `<`, `"`, and `${…}` that the highlighter escaped.
+    // including the `<`, `"`, and `${…}` the fence body carried. Shiki emits hex numeric
+    // references (&#x3C;) in text nodes, so the decoder handles those plus the named set.
     const body = await (await web("/acme/codey")).text();
     const m = body.match(/<pre class="noeta-code"><code>([\s\S]*?)<\/code><\/pre>/);
     expect(m).not.toBeNull();
     const textContent = m![1]
       .replace(/<[^>]+>/g, "")
+      .replace(/&#x([0-9A-Fa-f]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
       .replace(/&lt;/g, "<")
       .replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
       .replace(/&amp;/g, "&");
     expect(textContent).toBe(NOETA_SNIPPET);
+  });
+});
+
+describe("render cache (rendered_pages)", () => {
+  // Isolated storage means every test here must populate the cache itself (a fetch inside an
+  // earlier test is undone when that test ends) — each test is a self-contained story.
+  const row = (name: string, version: string, kind: string) =>
+    env.DB.prepare("SELECT renderer_rev, html FROM rendered_pages WHERE name = ? AND version = ? AND kind = ?")
+      .bind(name, version, kind)
+      .all<{ renderer_rev: string; html: string }>();
+
+  it("stores the rendered readme, docs, and sidebar fragments under the current renderer rev", async () => {
+    await web("/acme/greeter");
+    await web("/acme/std/1.0.0/docs");
+    for (const [name, version, kind] of [
+      ["acme/greeter", "1.1.0", "readme"],
+      ["acme/greeter", "1.1.0", "side"],
+      ["acme/std", "1.0.0", "docs"],
+      ["acme/std", "1.0.0", "side"],
+    ] as const) {
+      const { results } = await row(name, version, kind);
+      expect(results.map((r) => r.renderer_rev), `${name}@${version} ${kind}`).toEqual([RENDERER_REV]);
+    }
+  });
+
+  it("serves the second view from D1 — mutating the cached row changes the page", async () => {
+    await web("/acme/greeter"); // miss: renders and stores
+    await env.DB.prepare(
+      "UPDATE rendered_pages SET html = ? WHERE name = 'acme/greeter' AND version = '1.1.0' AND kind = 'readme'",
+    )
+      .bind(`<p id="from-cache-sentinel">served from D1</p>`)
+      .run();
+    const body = await (await web("/acme/greeter")).text();
+    // The sentinel proves the page body came from the mutated row, not a re-render.
+    expect(body).toContain("from-cache-sentinel");
+    expect(body).not.toContain("A <strong>friendly</strong> greeting library.");
+  });
+
+  it("treats a renderer_rev bump as a miss and retires the stale row on write", async () => {
+    // A row from a hypothetical older renderer: wrong rev, poisoned content.
+    await env.DB.prepare(
+      "INSERT INTO rendered_pages (name, version, kind, renderer_rev, html, created_at) VALUES " +
+        "('acme/greeter', '1.1.0', 'readme', 'stale-rev-0', '<p id=\"stale-poison\">old renderer</p>', '2020-01-01T00:00:00Z')",
+    ).run();
+    const body = await (await web("/acme/greeter")).text();
+    // The stale row is NOT served — the rev mismatch forced a fresh render.
+    expect(body).not.toContain("stale-poison");
+    expect(body).toContain("A <strong>friendly</strong> greeting library.");
+    // And the write opportunistically deleted the stale row, leaving only the current rev.
+    const { results } = await row("acme/greeter", "1.1.0", "readme");
+    expect(results.map((r) => r.renderer_rev)).toEqual([RENDERER_REV]);
+  });
+
+  it("shares the cached sidebar snippets across tabs", async () => {
+    await web("/acme/greeter/1.1.0/versions"); // populates kind='side'
+    await env.DB.prepare(
+      "UPDATE rendered_pages SET html = ? WHERE name = 'acme/greeter' AND version = '1.1.0' AND kind = 'side'",
+    )
+      .bind(`<p id="side-cache-sentinel">cached rail</p>`)
+      .run();
+    // A different tab still serves the (mutated) cached snippets — one fragment, every tab.
+    const deps = await (await web("/acme/greeter/1.1.0/deps")).text();
+    expect(deps).toContain("side-cache-sentinel");
+  });
+
+  it("bypasses the docs cache for a ?q= search (its filtering is query-dependent)", async () => {
+    await web("/acme/std/1.0.0/docs"); // populates kind='docs' (unqueried render)
+    await env.DB.prepare(
+      "UPDATE rendered_pages SET html = ? WHERE name = 'acme/std' AND version = '1.0.0' AND kind = 'docs'",
+    )
+      .bind(`<p id="docs-cache-sentinel">cached docs</p>`)
+      .run();
+    // Unqueried: served from the mutated cache.
+    expect(await (await web("/acme/std/1.0.0/docs")).text()).toContain("docs-cache-sentinel");
+    // Queried: rendered live — the sentinel never appears, the filter markup does.
+    const searched = await (await web("/acme/std/1.0.0/docs?q=sqrt")).text();
+    expect(searched).not.toContain("docs-cache-sentinel");
+    expect(searched).toContain(`class="docs-results searching"`);
+  });
+
+  it("invalidates the cached readme when a last-wins upload overwrites it", async () => {
+    await web("/acme/codey"); // cache the original render
+    expect((await row("acme/codey", "0.1.0", "readme")).results.length).toBe(1);
+    expect(
+      (await putText("/packages/acme/codey/readme/0.1.0", "# codey\n\nReplaced by a re-upload.", TOKEN)).status,
+    ).toBe(200);
+    // The PUT dropped the row, so the next view renders the NEW markdown.
+    expect((await row("acme/codey", "0.1.0", "readme")).results.length).toBe(0);
+    const body = await (await web("/acme/codey")).text();
+    expect(body).toContain("Replaced by a re-upload.");
+    expect(body).not.toContain("Highlighting fixture.");
+  });
+
+  it("cold-renders a README-sized page once, then serves it cached (timing probe)", async () => {
+    // Rough wall-clock only (workerd advances timers on I/O, so CPU time under-reports): the
+    // numbers are logged for the perf report, not asserted — flakiness lives in CI load.
+    const t0 = Date.now();
+    await web("/acme/bigread");
+    const t1 = Date.now();
+    const body = await (await web("/acme/bigread")).text();
+    const t2 = Date.now();
+    console.log(`[render-cache] bigread cold=${t1 - t0}ms warm=${t2 - t1}ms`);
+    expect(body).toContain(`<pre class="noeta-code">`);
+    // The warm view really was a cache hit.
+    expect((await row("acme/bigread", "1.0.0", "readme")).results.length).toBe(1);
   });
 });
