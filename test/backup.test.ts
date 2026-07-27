@@ -1,7 +1,7 @@
 import { applyD1Migrations, createExecutionContext, env, fetchMock, waitOnExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import worker, { type Env } from "../src/index";
-import { applyRetention, BACKUP_CRON, BACKUP_TABLES, runBackup } from "../src/backup";
+import { applyRetention, BACKUP_CRON, BACKUP_EXCLUDED, BACKUP_TABLES, runBackup } from "../src/backup";
 
 // Nightly automated D1→R2 backups (src/backup.ts). Miniflare simulates the BACKUPS R2 bucket; the
 // dumps are proven restorable by executing them verbatim into RESTORE_DB — a second, fresh local D1
@@ -102,6 +102,23 @@ beforeAll(() => {
 });
 
 describe("nightly backup cron", () => {
+  it("accounts for every table in the schema — backed up or deliberately excluded", async () => {
+    // The completeness tripwire: a migration adding a table must either join BACKUP_TABLES (and
+    // scripts/backup-d1.sh) or be excluded BY NAME with a reason in BACKUP_EXCLUDED. Virtual/shadow
+    // tables (the FTS family) and sqlite internals are excluded structurally, mirroring backup-d1.sh.
+    const rows = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' " +
+        "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf%' AND name NOT LIKE 'package_fts%'",
+    ).all<{ name: string }>();
+    const accounted = new Set<string>([...BACKUP_TABLES, ...BACKUP_EXCLUDED]);
+    const unaccounted = (rows.results ?? []).map((r) => r.name).filter((n) => !accounted.has(n));
+    expect(unaccounted, "new table is neither backed up nor deliberately excluded").toEqual([]);
+    // And the two lists never overlap or name phantom tables.
+    const real = new Set((rows.results ?? []).map((r) => r.name));
+    for (const n of accounted) expect(real.has(n), `listed table \`${n}\` does not exist`).toBe(true);
+    for (const n of BACKUP_EXCLUDED) expect(BACKUP_TABLES).not.toContain(n);
+  });
+
   it("snapshots every real table plus a manifest under one dated prefix, in the wrangler dump format", async () => {
     await seedHostileRows();
     await triggerCron(BACKUP_CRON);

@@ -116,7 +116,9 @@ virtual tables ("cannot export databases with Virtual Tables (fts5)"), and this 
   ```
 
 The table list lives in the script **and** in `BACKUP_TABLES` (`src/backup.ts`) — keep both in
-sync when a migration adds a table.
+sync when a migration adds a table; the completeness test in `test/backup.test.ts` fails when a
+table is neither backed up nor named in `BACKUP_EXCLUDED` (currently only `rendered_pages`, the
+re-derivable render cache).
 
 `backups/` is gitignored — dumps are operator artifacts, not repo content. Restore, should it ever
 come to that, into a **fresh** database. For a nightly snapshot, first download a dated prefix

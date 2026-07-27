@@ -25,7 +25,8 @@
 
 /** Every real (non-virtual, non-shadow) table, d1_migrations included so a restore knows its
  *  migration state. KEEP IN SYNC with `TABLES=(…)` in scripts/backup-d1.sh (the manual pre-migration
- *  tool) and with migrations/ when a migration adds a table. */
+ *  tool) and with migrations/ when a migration adds a table — the completeness test in
+ *  test/backup.test.ts fails if a table is neither listed here nor in BACKUP_EXCLUDED. */
 export const BACKUP_TABLES = [
   "d1_migrations",
   "scopes",
@@ -38,6 +39,17 @@ export const BACKUP_TABLES = [
   "advisories",
   "reports",
   "rate_limits",
+] as const;
+
+/** Tables DELIBERATELY absent from the dumps, each with its reason. The FTS family is excluded
+ *  structurally (virtual/shadow tables — the reason dumps are per-table at all); everything named
+ *  here is a conscious call, enforced by the completeness test so a new table can't silently miss
+ *  the backups without someone deciding it should. */
+export const BACKUP_EXCLUDED = [
+  // Pure render cache: re-derivable from `readmes` + `docs` on demand. A restore recreates it
+  // empty (migrations) and pages refill it on first view; dumping rendered HTML would only
+  // bloat every snapshot.
+  "rendered_pages",
 ] as const;
 
 /** The backup job's cron expression — scheduled() branches on `event.cron`, so this MUST match one

@@ -23,7 +23,9 @@ DEST="$OUT_DIR/$DB_NAME-$STAMP"
 
 # Every real (non-virtual, non-shadow) table, d1_migrations included so a restore knows its
 # migration state. Keep in sync with migrations/ when adding a table, AND with BACKUP_TABLES in
-# src/backup.ts — the nightly automated R2 snapshot dumps the same list.
+# src/backup.ts — the nightly automated R2 snapshot dumps the same list, and its completeness
+# test fails when a table is neither backed up nor deliberately excluded. Deliberately absent:
+# rendered_pages (a pure render cache, re-derivable from readmes+docs — see BACKUP_EXCLUDED).
 TABLES=(d1_migrations scopes packages docs readmes package_keywords name_mappings log advisories reports rate_limits)
 
 mkdir -p "$DEST"
