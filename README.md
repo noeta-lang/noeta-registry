@@ -45,6 +45,10 @@ served by the same Worker):
 - `/{company}/{package}/{version}` — a specific version.
 - `/{company}/{package}/{version}/docs` — **rendered documentation** from the release's stored
   `docs.json` (the docs.rs analog), if the publisher uploaded one.
+- `/{company}/{package}/{version}/log` — the release's **transparency-log entry**, rendered: what was
+  logged, the signed tree head it is proven against, and the audit path between them. The same proof
+  `/v1/log/proof/…` serves as JSON. The sidebar's `log entry` link opens this in a modal where the
+  browser supports it, and navigates here otherwise.
 
 It renders only already-public index data and stored docs/READMEs, so it needs no login, sessions,
 or account model — management (publish, yank) stays in the `noeta` CLI. Doc and README prose is

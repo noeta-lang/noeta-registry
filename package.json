@@ -11,7 +11,7 @@
     "deploy": "node scripts/sync-grammars.mjs && wrangler deploy",
     "typecheck": "node scripts/sync-grammars.mjs && tsc --noEmit",
     "test": "node scripts/sync-grammars.mjs && vitest run",
-    "check:overflow": "node ../noeta-theme/scripts/check-overflow.mjs --base-url http://127.0.0.1:8787 --paths /,/para/p2p,/para/p2p/0.1.3/versions,/para/p2p/0.1.3/security,/para/p2p/0.1.3/deps",
+    "check:overflow": "node ../noeta-theme/scripts/check-overflow.mjs --base-url http://127.0.0.1:8787 --paths /,/para/p2p,/para/p2p/0.1.3/versions,/para/p2p/0.1.3/security,/para/p2p/0.1.3/deps,/para/p2p/0.1.3/log",
     "check:chrome": "node ../noeta-theme/scripts/check-chrome.mjs --base-url http://127.0.0.1:8787",
     "migrate:local": "wrangler d1 migrations apply noeta-registry --local",
     "migrate:remote": "wrangler d1 migrations apply noeta-registry --remote"
