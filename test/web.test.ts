@@ -278,6 +278,19 @@ beforeAll(async () => {
     { version: "0.1.0", url: "https://github.com/acme/parakit", tag: "v0.1.0", sha: "eee", keywords: ["para"] },
     TOKEN,
   );
+  // A release whose git coordinates carry HTML and a javascript: URL. `url`/`tag` are only
+  // shape-checked at publish, and the transparency-log record echoes them verbatim — so the proof
+  // page is one more surface that has to render publisher input inert.
+  await post(
+    "/packages/acme/nasty",
+    {
+      version: "1.0.0",
+      url: 'javascript:alert(1)//<img src=x onerror="alert(2)">',
+      tag: "<script>alert(3)</script>",
+      sha: "f0f",
+    },
+    TOKEN,
+  );
   // A described package, so search can be exercised by name, keyword, and description text.
   await post(
     "/packages/acme/imgfx",
@@ -314,9 +327,10 @@ describe("registry web UI", () => {
 
   it("pins every served script in the CSP by its real hash", async () => {
     // Inline scripts are allowed only when pinned by SHA-256 — the anti-XSS property holds only if
-    // every script the page serves has its hash in the CSP. The docs tab serves three (copy, the
-    // shared chrome drawer, and docs search); recompute each from the served bytes and require it
-    // in script-src, so editing a script without updating its hash (or vice versa) fails here.
+    // every script the page serves has its hash in the CSP. The docs tab serves four (copy, the
+    // shared chrome drawer, the log-proof modal, and docs search); recompute each from the served
+    // bytes and require it in script-src, so editing a script without updating its hash (or vice
+    // versa) fails here.
     // The drawer's source lives in @noeta/theme, so this is also what catches a chrome change
     // landing in the sibling repo without a matching hash bump here.
     const sha256 = async (s: string) =>
@@ -324,7 +338,7 @@ describe("registry web UI", () => {
     const r = await web("/acme/greeter/1.1.0/docs");
     const body = await r.text();
     const scripts = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-    expect(scripts.length, "the docs tab serves the copy, drawer and docs-search scripts").toBe(3);
+    expect(scripts.length, "the docs tab serves the copy, drawer, proof-modal and docs-search scripts").toBe(4);
     const csp = r.headers.get("content-security-policy") ?? "";
     for (const s of scripts) expect(csp).toContain(`'${await sha256(s)}'`);
     // Hash sources only, never a blanket allowance.
@@ -785,6 +799,90 @@ describe("copy buttons", () => {
       .replace(/&#39;/g, "'")
       .replace(/&amp;/g, "&");
     expect(textContent).toBe(NOETA_SNIPPET);
+  });
+});
+
+describe("transparency-log entry (the human surface)", () => {
+  const proofJson = async (name: string, version: string) =>
+    (await (await SELF.fetch(`https://registry.test/v1/log/proof/${name}/${version}`)).json()) as {
+      index: number;
+      tree_size: number;
+      root_hash: string;
+      record: string;
+      proof: string[];
+    };
+
+  it("points the sidebar at the rendered entry, not the raw JSON", async () => {
+    const body = await (await web("/acme/greeter/1.1.0")).text();
+    const { index } = await proofJson("acme/greeter", "1.1.0");
+    expect(body).toContain(`<a class="log-link" href="/acme/greeter/1.1.0/log">#${index}</a>`);
+    // The JSON endpoint is no longer what a reader lands on from the rail.
+    expect(body).not.toContain(`href="/v1/log/proof/acme/greeter/1.1.0"`);
+    // The dialog the enhancement fills is server-rendered, so it exists before any script runs.
+    expect(body).toContain(`<dialog id="proof-modal"`);
+    expect(body).toContain(`<div class="modal-body"></div>`);
+  });
+
+  it("renders the entry as a page: what was logged, the tree head, and the audit path", async () => {
+    const r = await web("/acme/greeter/1.1.0/log");
+    expect(r.status).toBe(200);
+    expect(r.headers.get("content-type")).toContain("text/html");
+    const body = await r.text();
+    const proof = await proofJson("acme/greeter", "1.1.0");
+    expect(body).toContain("Transparency-log entry");
+    // The tree head this is proven against, and every sibling on the path to it.
+    expect(body).toContain(proof.root_hash);
+    for (const sibling of proof.proof) expect(body).toContain(sibling);
+    // What was logged, decoded — plus the canonical bytes themselves, which are what a client hashes.
+    expect(body).toContain(LATEST_SHA);
+    expect(body).toContain("MIT OR Apache-2.0");
+    expect(body).toContain("https://github.com/acme/greeter");
+    expect(body).toContain("noeta-transparency-log-v1");
+    // The machine surface stays one click away rather than being replaced.
+    expect(body).toContain(`href="/v1/log/proof/acme/greeter/1.1.0"`);
+    expect(body).toContain(`href="/v1/log/checkpoint"`);
+  });
+
+  it("serves the bare card to the modal's fetch", async () => {
+    const r = await web("/acme/greeter/1.1.0/log?fragment=1");
+    expect(r.status).toBe(200);
+    const body = await r.text();
+    expect(body.startsWith(`<section class="proof">`)).toBe(true);
+    // A fragment, not a document — the modal injects it into a page that already has chrome.
+    expect(body).not.toContain("<!doctype html>");
+    expect(body).not.toContain("site-foot");
+    // Same card as the page serves.
+    const page = await (await web("/acme/greeter/1.1.0/log")).text();
+    expect(page).toContain(body.trim());
+  });
+
+  it("404s a release with no log entry, on both the page and the fragment", async () => {
+    expect((await web("/acme/greeter/9.9.9/log")).status).toBe(404);
+    expect((await web("/acme/nope/1.0.0/log")).status).toBe(404);
+    // The modal's fetch sees the failure and falls back to navigating to the (404) page.
+    const fragment = await web("/acme/nope/1.0.0/log?fragment=1");
+    expect(fragment.status).toBe(404);
+    expect(await fragment.text()).toBe("");
+  });
+
+  it("renders publisher-controlled record fields inert", async () => {
+    const body = await (await web("/acme/nasty/1.0.0/log")).text();
+    expect(body).toContain("&lt;script&gt;alert(3)&lt;/script&gt;");
+    expect(body).not.toContain("<script>alert(3)</script>");
+    // The <img> payload survives only as text: no tag, and no attribute an escape would have opened.
+    expect(body).toContain("&lt;img src=x onerror=&quot;alert(2)&quot;&gt;");
+    expect(body).not.toContain(`onerror="`);
+    // A javascript: repository URL is shown as text, never linked.
+    expect(body).not.toContain(`href="javascript:`);
+    expect(body).toContain("javascript:alert(1)");
+  });
+
+  it("allows the modal's same-origin fetch without loosening script-src", async () => {
+    const csp = (await web("/acme/greeter/1.1.0")).headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("connect-src 'self'");
+    const scriptSrc = csp.match(/script-src ([^;]*)/)?.[1] ?? "";
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
+    expect(scriptSrc).not.toContain("'self'");
   });
 });
 

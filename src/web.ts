@@ -15,6 +15,7 @@
 import MarkdownIt from "markdown-it";
 import { renderHeader, renderFooter, DRAWER_SCRIPT } from "@noeta/theme/chrome";
 import type { Env } from "./index";
+import { type Inclusion, inclusionData, signatureFor } from "./log";
 import { ensureHighlighter, highlightHtml, resolveLang } from "./shiki";
 import { cachedRender } from "./render-cache";
 import { satisfies } from "./semver";
@@ -48,6 +49,55 @@ const DOCSEARCH_SCRIPT =
   `(function(){var i=document.getElementById("docsearch");var r=document.getElementById("docs-results");if(!i||!r)return;var c=document.getElementById("docsearch-count");var s=r.querySelector(".docsearch-summary");if(s)s.hidden=true;if(i.form)i.form.addEventListener("submit",function(e){e.preventDefault()});function run(){var q=i.value.trim().toLowerCase();r.classList.toggle("searching",q.length>0);var n=0;r.querySelectorAll(".module").forEach(function(m){var v=0;m.querySelectorAll(".decl").forEach(function(d){var hit=!q||(d.getAttribute("data-text")||"").indexOf(q)>=0;d.hidden=!hit;if(hit)v++});m.hidden=q.length>0&&v===0;n+=v});if(c)c.textContent=q?n+" match"+(n===1?"":"es"):""}i.addEventListener("input",run);run()})();`;
 /** SHA-256 of DOCSEARCH_SCRIPT, as a CSP `script-src` hash source. */
 const DOCSEARCH_SCRIPT_HASH = "sha256-SQJFu6r3AoXLtZBO+fqEnWeBG/t+1UiIifug/+Z1xM0=";
+
+/**
+ * Progressive enhancement for the sidebar's transparency-log link. Without it the link is an ordinary
+ * navigation to `/{package}/{version}/log`, the server-rendered proof page; with it, the click fetches
+ * that same page's `?fragment=1` card and shows it in a `<dialog>` instead — so checking a release's
+ * log entry never costs you your place on the package page. Any failure (offline, 404, a browser
+ * without `<dialog>`) falls back to following the link, which is why the href is a real page and not
+ * a `#` handle. Pinned by hash like COPY_SCRIPT — edit → recompute (web.test.ts fails until they
+ * match). Written readably rather than minified: it has real control flow, and the hash covers bytes
+ * either way.
+ */
+const PROOF_SCRIPT = `(() => {
+  const dialog = document.getElementById("proof-modal");
+  if (!(dialog instanceof HTMLDialogElement) || typeof dialog.showModal !== "function") return;
+  const body = dialog.querySelector(".modal-body");
+  if (!body) return;
+
+  document.addEventListener("click", (event) => {
+    const link = event.target instanceof Element ? event.target.closest("a.log-link") : null;
+    if (!link) return;
+    // A modified click means "open elsewhere" — leave the real navigation alone.
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    body.innerHTML = '<p class="muted">Loading the log entry…</p>';
+    dialog.showModal();
+    fetch(link.href + "?fragment=1", { headers: { accept: "text/html" } })
+      .then((response) => (response.ok ? response.text() : Promise.reject(new Error(String(response.status)))))
+      .then((fragment) => {
+        body.innerHTML = fragment;
+        body.scrollTop = 0;
+      })
+      .catch(() => {
+        dialog.close();
+        window.location.href = link.href;
+      });
+  });
+
+  // Backdrop click (the target is the dialog itself, outside the panel) and the close button.
+  dialog.addEventListener("click", (event) => {
+    const inClose = event.target instanceof Element && event.target.closest(".modal-close");
+    if (event.target === dialog || inClose) dialog.close();
+  });
+  dialog.addEventListener("close", () => {
+    body.innerHTML = "";
+  });
+})();`;
+/** SHA-256 of PROOF_SCRIPT, as a CSP `script-src` hash source. */
+const PROOF_SCRIPT_HASH = "sha256-rpN/Gx9gv9sN6XFeWMplRRFrn97f1KPB9wERR4a0+Wg=";
 
 /**
  * SHA-256 of @noeta/theme's DRAWER_SCRIPT, which folds the header nav into a modal drawer on
@@ -118,9 +168,15 @@ async function routeWeb(env: Env, parts: string[], params?: URLSearchParams): Pr
   if (parts.length === 2 && parts[0] === "keywords") {
     return keywordPage(env, parts[1]);
   }
+  const [company, pkg, version, sub] = parts;
+  // `/{company}/{package}/{version}/log` — the release's transparency-log entry, rendered. Not a tab:
+  // it is one leaf page about one release, and the sidebar link opens this same card in a modal
+  // (`?fragment=1` serves the card alone, which is what PROOF_SCRIPT fetches).
+  if (parts.length === 4 && sub === "log" && IDENT.test(company) && IDENT.test(pkg) && SEMVER.test(version)) {
+    return logProofPage(env, `${company}/${pkg}`, version, params?.get("fragment") === "1");
+  }
   // `/{company}/{package}[/{version}[/{tab}]]`. The readme is the bare version URL, so `/readme`
   // is not a route — one canonical address per section.
-  const [company, pkg, version, sub] = parts;
   const tab = sub !== undefined && sub !== "readme" && (TABS as readonly string[]).includes(sub) ? (sub as Tab) : null;
   if (
     parts.length >= 2 &&
@@ -284,9 +340,10 @@ async function packagePage(
        <div class="pkg-grid">
          <div class="pkg-main">${main}</div>
          ${sidebar(name, selected, logIndex, sideSnippets)}
-       </div>`,
+       </div>
+       ${logIndex !== null ? proofModal() : ""}`,
       "wide",
-      tab === "docs" ? DOCSEARCH_SCRIPT : "",
+      [...(logIndex !== null ? [PROOF_SCRIPT] : []), ...(tab === "docs" ? [DOCSEARCH_SCRIPT] : [])],
     ),
   };
 }
@@ -353,9 +410,12 @@ function sidebar(name: string, r: Row, logIndex: number | null, snippets: string
            "this version = this commit", so the value a reader verifies against must be on the page
            and selectable, not hidden behind a tooltip. -->
       <tr><td>commit</td><td class="mono sha">${esc(r.sha)}</td></tr>
+      <!-- The rendered proof page, not the raw /v1/log/proof JSON: a reader clicking "#18" wants to
+           see what was logged, and PROOF_SCRIPT upgrades this click into a modal so they keep their
+           place. Both surfaces render the same card. -->
       ${
         logIndex !== null
-          ? `<tr><td>log entry</td><td class="mono"><a href="/v1/log/proof/${esc(name)}/${esc(r.version)}">#${logIndex}</a></td></tr>`
+          ? `<tr><td>log entry</td><td class="mono"><a class="log-link" href="/${esc(name)}/${esc(r.version)}/log">#${logIndex}</a></td></tr>`
           : ""
       }
     </table>
@@ -378,6 +438,18 @@ const COPY_ICON =
   `<svg class="ic-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
 const CHECK_ICON =
   `<svg class="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+/** The proof modal's dismiss glyph — same stroke language as the theme's drawer close. */
+const CLOSE_ICON =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
+
+/** The empty shell PROOF_SCRIPT fills with the fetched proof card. Server-rendered (so the dialog is
+ *  in the DOM before any script runs) and inert without JS — the sidebar link is a real page. */
+function proofModal(): string {
+  return `<dialog id="proof-modal" class="modal" aria-label="Transparency-log entry">
+    <button class="modal-close" type="button" aria-label="Close">${CLOSE_ICON}</button>
+    <div class="modal-body"></div>
+  </dialog>`;
+}
 
 /**
  * A copyable code block from *rendered* code HTML (already escaped, possibly carrying shiki
@@ -502,6 +574,144 @@ function securityMain(advisories: AdvisoryRow[], version: string): string {
     })
     .join("");
   return `${items}<p class="side-note">Advisory data is served signed at <code>/v1/advisories</code>; <code>noeta audit</code> is the authority for whether a build is affected.</p>`;
+}
+
+// --- transparency log ----------------------------------------------------------------------------
+
+/**
+ * `/{company}/{package}/{version}/log` — the release's transparency-log entry, rendered. The same
+ * proof `/v1/log/proof/…` serves as JSON (that endpoint is still the machine surface, linked from
+ * the card); this is the human one. `?fragment=1` returns the bare card, which is what the sidebar's
+ * modal fetches — one renderer, so the page and the modal can never disagree.
+ *
+ * The proof is computed on demand rather than baked into every package view: it folds every leaf in
+ * the log, and it changes whenever anything is published, so it belongs behind the click.
+ */
+async function logProofPage(env: Env, name: string, version: string, fragment: boolean): Promise<Page> {
+  const proof = await inclusionData(env, name, version);
+  if (proof === null) {
+    // Same verdict as the JSON endpoint: an unpublished release and an unlogged one are both "no
+    // entry". The fragment path returns nothing — the modal's fetch sees the 404 and falls back to
+    // navigating here, where the reader gets the full 404 page.
+    return {
+      status: 404,
+      body: fragment ? "" : notFoundPage(`${name}@${version} is not in the transparency log.`),
+    };
+  }
+  // The signature over this exact tree head — the same bytes /v1/log/checkpoint signs, taken from the
+  // head we just computed rather than a second pass over the leaves. Null when signing is unconfigured.
+  const signature = await signatureFor(env, proof.tree_size, proof.root_hash);
+  const card = proofCard(name, version, proof, signature, env.LOG_PUBLIC_KEY ?? null);
+  if (fragment) return { status: 200, body: card };
+  return {
+    status: 200,
+    body: layout(
+      `${name} ${version} — transparency log`,
+      `<nav class="crumb"><a href="/">registry</a> / <a href="/${esc(name)}">${esc(name)}</a> /
+         <a href="/${esc(name)}/${esc(version)}">${esc(version)}</a></nav>
+       <h1>${esc(name)} <span class="version">${esc(version)}</span></h1>
+       ${card}
+       <p class="proof-back"><a href="/${esc(name)}/${esc(version)}">← back to the package</a></p>`,
+    ),
+  };
+}
+
+/**
+ * The log entry as a card: what was logged, the tree head it is proven against, and the audit path
+ * that ties them together. Shared by the standalone page and the modal.
+ */
+function proofCard(
+  name: string,
+  version: string,
+  p: Inclusion,
+  signature: string | null,
+  publicKey: string | null,
+): string {
+  const f = recordFields(p.record);
+  const repo = sanitizeUrl(f.url);
+  const path = p.proof.length
+    ? `<p class="side-note">Hash the record above into a leaf, fold in these ${p.proof.length} sibling
+         hash${p.proof.length === 1 ? "" : "es"} bottom-up, and you get the root hash above. That is the proof.</p>
+       <ol class="audit">${p.proof.map((h) => `<li class="mono">${esc(h)}</li>`).join("")}</ol>`
+    : `<p class="side-note">The log holds a single entry, so this leaf's hash <em>is</em> the root — no
+         audit path is needed.</p>`;
+  return `<section class="proof">
+    <h2 class="proof-head">Transparency-log entry <span class="version">#${p.index}</span></h2>
+    <p class="lead">Every published release is appended to an append-only Merkle log. This proof lets
+      anyone check that <span class="mono">${esc(name)} ${esc(version)}</span> is in it — and that the
+      log was only ever appended to — without trusting the registry.</p>
+
+    <h3>Proven against</h3>
+    <table class="kv proof-kv">
+      <tr><td>leaf index</td><td class="mono">#${p.index}</td></tr>
+      <tr><td>tree size</td><td class="mono">${p.tree_size} entr${p.tree_size === 1 ? "y" : "ies"}</td></tr>
+      <tr><td>root hash</td><td class="mono sha">${esc(p.root_hash)}</td></tr>
+      ${signature ? `<tr><td>signature</td><td class="mono sha">${esc(signature)}</td></tr>` : ""}
+      ${publicKey ? `<tr><td>log key</td><td class="mono sha">${esc(publicKey)}</td></tr>` : ""}
+    </table>
+
+    <h3>What was logged</h3>
+    <table class="kv proof-kv">
+      <tr><td>package</td><td class="mono">${esc(f.name)}</td></tr>
+      <tr><td>version</td><td class="mono">${esc(f.version)}</td></tr>
+      <tr><td>repository</td><td class="mono sha">${
+        repo ? `<a href="${esc(repo)}" rel="nofollow noopener">${esc(f.url)}</a>` : esc(f.url)
+      }</td></tr>
+      <tr><td>tag</td><td class="mono">${esc(f.tag)}</td></tr>
+      <tr><td>commit</td><td class="mono sha">${esc(f.sha)}</td></tr>
+      <tr><td>provenance</td><td>${provenanceCell(f.provenance)}</td></tr>
+      <tr><td>license</td><td class="mono">${
+        f.license ? esc(f.license) : `<span class="muted">not declared</span>`
+      }</td></tr>
+    </table>
+    <p class="side-note">The canonical bytes the leaf hashes — reproduce these exactly to recompute it:</p>
+    ${snippetHtml(esc(p.record))}
+
+    <h3>Audit path</h3>
+    ${path}
+
+    <p class="side-note"><code>noeta add</code> verifies this proof against a signed checkpoint on every
+      install, so you rarely have to. Machine-readable:
+      <a href="/v1/log/proof/${esc(name)}/${esc(version)}">this proof as JSON</a> ·
+      <a href="/v1/log/checkpoint">the signed tree head</a> ·
+      <a href="/v1/log/key">the log's public key</a>.</p>
+  </section>`;
+}
+
+/** The canonical record's fields (PROTOCOL.md), parsed exactly as a client parses them: fields are
+ *  only ever *appended*, so a short record pre-dates the missing ones rather than being malformed —
+ *  `license` was appended after the original six. Field 0 is the format prefix. */
+function recordFields(record: string): {
+  name: string;
+  version: string;
+  url: string;
+  tag: string;
+  sha: string;
+  provenance: string;
+  license: string;
+} {
+  const l = record.split("\n");
+  const at = (i: number) => l[i] ?? "";
+  return {
+    name: at(1),
+    version: at(2),
+    url: at(3),
+    tag: at(4),
+    sha: at(5),
+    provenance: at(6),
+    license: at(7),
+  };
+}
+
+/** `key:{sig}` / `keyless:{sha256(bundle)}` / `unsigned` — named, with the bound value beside it. */
+function provenanceCell(provenance: string): string {
+  if (provenance.startsWith("key:")) {
+    return `signed with the scope's key <span class="mono sha">${esc(provenance.slice(4))}</span>`;
+  }
+  if (provenance.startsWith("keyless:")) {
+    return `keyless (Sigstore) bundle <span class="mono sha">${esc(provenance.slice(8))}</span>`;
+  }
+  return `<span class="muted">unsigned</span>`;
 }
 
 const isDecl = (i: DocsSection | DocsDecl): i is DocsDecl =>
@@ -1017,9 +1227,12 @@ function html(body: string, status = 200): Response {
       // without bundling font binaries.
       // `data:` in img-src is for the `.field` grain texture (an inline SVG background) — without it
       // the atmospheric noise is silently blocked.
+      // `connect-src 'self'` is what lets PROOF_SCRIPT fetch the log-entry fragment. It widens
+      // nothing an attacker can reach: no injected script can execute in the first place (script-src
+      // is hash-pinned), so the only code that can open a connection is ours, to our own origin.
       "content-security-policy":
         `default-src 'none'; script-src '${COPY_SCRIPT_HASH}' '${DOCSEARCH_SCRIPT_HASH}' ` +
-        `'${DRAWER_SCRIPT_HASH}'; ` +
+        `'${DRAWER_SCRIPT_HASH}' '${PROOF_SCRIPT_HASH}'; connect-src 'self'; ` +
         "style-src 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src https://fonts.gstatic.com; img-src https: data:",
     },
@@ -1038,7 +1251,7 @@ function html(body: string, status = 200): Response {
  * HTML document with no asset pipeline to emit a .css file from, so the chrome CSS is duplicated
  * here and has to be kept in lockstep with noeta-theme/css/theme.css by hand.
  */
-function layout(title: string, body: string, variant: "" | "wide" = "", extraScript = ""): string {
+function layout(title: string, body: string, variant: "" | "wide" = "", extraScripts: string[] = []): string {
   // `--page-max` drives the header, footer, AND page container together, so the chrome always spans
   // the same width as the content. A wide page (the tabbed package view + its sidebar) sets it on
   // <body>, which the header/footer wraps read too — otherwise they'd stay pinned to the narrow
@@ -1239,6 +1452,39 @@ table.kv td{padding:.35rem .6rem .35rem 0;vertical-align:top;border-bottom:1px s
 table.kv td:first-child{font-family:var(--font-mono);color:var(--text-2);width:8rem;font-size:.85rem}
 table.versions td{padding:.45rem .6rem;border-bottom:1px solid var(--line)}
 table.versions tr.here{background:var(--accent-dim)}
+/* transparency-log entry — one card, rendered either as its own page or inside the modal, so the
+   styling is deliberately container-agnostic (no .page-only selectors). */
+.proof>:first-child{margin-top:0}
+.proof-head{font-size:clamp(1.25rem,3vw,1.6rem)}
+.proof .lead{font-size:.95rem}
+.proof h3{margin:1.9rem 0 .5rem;font-family:var(--font-mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-2);font-weight:500}
+/* qualified with a leading table. so these out-specify the shared table.kv td rules above */
+table.proof-kv td{font-size:.88rem;padding:.3rem .9rem .3rem 0;vertical-align:top}
+table.proof-kv td:first-child{width:8.5rem;color:var(--text-2);white-space:nowrap}
+/* hex hashes are one unbroken "word": wrap them rather than truncate — the value a reader verifies
+   against has to be on the page in full, and selectable */
+table.proof-kv td.sha{overflow-wrap:anywhere;line-height:1.5}
+/* on a phone the label column would leave a 64-hex hash wrapping in a ~12ch gutter, so stack:
+   label on its own line, value full width */
+@media (max-width:34rem){
+table.proof-kv,table.proof-kv tbody,table.proof-kv tr,table.proof-kv td{display:block;width:auto}
+table.proof-kv tr{border-bottom:1px solid var(--line);padding:.3rem 0}
+table.proof-kv td{border:0;padding:0}
+table.proof-kv td:first-child{width:auto;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;white-space:normal}
+}
+ol.audit{margin:.7rem 0;padding-left:1.7rem;color:var(--text-1)}
+ol.audit li{margin:.18rem 0;font-size:.8rem;overflow-wrap:anywhere}
+ol.audit li::marker{color:var(--text-2);font-family:var(--font-mono);font-size:.78rem}
+.proof-back{margin-top:2rem}
+/* the modal PROOF_SCRIPT opens over the package page; with JS off it is never shown and the sidebar
+   link is a plain navigation to the same card's page */
+.modal{width:min(46rem,92vw);max-width:none;padding:0;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--surface-1);color:var(--text-0)}
+.modal::backdrop{background:rgba(6,8,11,.62);backdrop-filter:blur(3px)}
+.modal-body{max-height:82vh;overflow-y:auto;overscroll-behavior:contain;padding:1.5rem clamp(1.1rem,3vw,1.9rem) 1.8rem}
+.modal-body a{color:var(--accent-bright)}.modal-body a:hover{color:var(--accent);text-decoration:underline}
+.modal-close{position:absolute;top:.4rem;right:.4rem;display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;padding:0;border:0;border-radius:8px;background:none;color:var(--text-2);cursor:pointer}
+.modal-close:hover{color:var(--accent-bright)}
+.modal-close svg{width:20px;height:20px}
 /* deps + nav */
 ul.deps,.modnav ul{list-style:none;padding:0}
 ul.deps li{padding:.3rem 0;border-bottom:1px solid var(--line)}
@@ -1313,7 +1559,7 @@ ${body}
 ${renderFooter({ site: "registry" })}
 <script>${COPY_SCRIPT}</script>
 <script>${DRAWER_SCRIPT}</script>
-${extraScript ? `<script>${extraScript}</script>` : ""}
+${extraScripts.map((s) => `<script>${s}</script>`).join("\n")}
 </body>
 </html>`;
 }

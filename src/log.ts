@@ -81,42 +81,68 @@ export function publicKey(env: LogEnv): Response {
   return json({ public_key: env.LOG_PUBLIC_KEY });
 }
 
-/** An inclusion proof for `name@version`: its leaf index, the current tree size + root, the canonical
- *  record (so the client recomputes the leaf), and the audit path. 404 if the release isn't logged. */
-export async function inclusion(env: LogEnv, name: string, version: string): Promise<Response> {
+/** An inclusion proof, as both the JSON body and the web browser's proof page serve it — the wire
+ *  shape IS this object, so the human page and the API can never describe different proofs. */
+export interface Inclusion {
+  index: number;
+  tree_size: number;
+  root_hash: string;
+  record: string;
+  proof: string[];
+}
+
+/** The inclusion proof for `name@version` — its leaf index, the current tree size + root, the
+ *  canonical record (so the client recomputes the leaf), and the audit path. Null if unlogged. */
+export async function inclusionData(env: LogEnv, name: string, version: string): Promise<Inclusion | null> {
   const row = await env.DB.prepare("SELECT idx, record FROM log WHERE name = ? AND version = ?")
     .bind(name, version)
     .first<{ idx: number; record: string }>();
-  if (!row) return json({ error: `${name}@${version} is not in the transparency log` }, 404);
+  return row ? proofAt(env, row.idx, row.record) : null;
+}
+
+/** The same proof for the leaf at an explicit `idx` (advisories are looked up by their stored log
+ *  index rather than by name/version). Null if no leaf sits at that index. */
+export async function inclusionDataAtIndex(env: LogEnv, idx: number): Promise<Inclusion | null> {
+  const row = await env.DB.prepare("SELECT record FROM log WHERE idx = ?")
+    .bind(idx)
+    .first<{ record: string }>();
+  return row ? proofAt(env, idx, row.record) : null;
+}
+
+async function proofAt(env: LogEnv, idx: number, record: string): Promise<Inclusion> {
   const leaves = await allLeaves(env);
-  const proof = await inclusionProof(leaves, row.idx);
+  const proof = await inclusionProof(leaves, idx);
   const root = await merkleRoot(leaves);
-  return json({
-    index: row.idx,
+  return {
+    index: idx,
     tree_size: leaves.length,
     root_hash: toHex(root),
-    record: row.record,
+    record,
     proof: proof.map(toHex),
-  });
+  };
+}
+
+/** `GET /v1/log/proof/{company}/{package}/{version}` — 404 if the release isn't logged. */
+export async function inclusion(env: LogEnv, name: string, version: string): Promise<Response> {
+  const data = await inclusionData(env, name, version);
+  if (!data) return json({ error: `${name}@${version} is not in the transparency log` }, 404);
+  return json(data);
 }
 
 /** An inclusion proof for the leaf at an explicit `idx` (used for non-release leaves like advisories,
  *  which are looked up by their stored log index rather than by name/version). */
 export async function inclusionAtIndex(env: LogEnv, idx: number): Promise<Response> {
-  const row = await env.DB.prepare("SELECT record FROM log WHERE idx = ?")
-    .bind(idx)
-    .first<{ record: string }>();
-  if (!row) return json({ error: `no transparency-log entry at index ${idx}` }, 404);
-  const leaves = await allLeaves(env);
-  const proof = await inclusionProof(leaves, idx);
-  const root = await merkleRoot(leaves);
-  return json({
-    index: idx,
-    tree_size: leaves.length,
-    root_hash: toHex(root),
-    record: row.record,
-    proof: proof.map(toHex),
-  });
+  const data = await inclusionDataAtIndex(env, idx);
+  if (!data) return json({ error: `no transparency-log entry at index ${idx}` }, 404);
+  return json(data);
+}
+
+/** The checkpoint signature over a tree head the caller already computed — what the proof page shows
+ *  beside the root hash, so a reader sees the *signed* head without a second pass over the leaves.
+ *  Null when no signing key is configured (the same condition that makes `/v1/log/checkpoint` 501). */
+export async function signatureFor(env: LogEnv, size: number, rootHex: string): Promise<string | null> {
+  if (!env.LOG_PRIVATE_KEY) return null;
+  return signCheckpoint(env.LOG_PRIVATE_KEY, size, rootHex);
 }
 
 /** A consistency proof that the log at size `from` is a prefix of the log at size `to` — the
