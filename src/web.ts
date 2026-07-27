@@ -14,6 +14,7 @@
 
 import MarkdownIt from "markdown-it";
 import { renderHeader, renderFooter, DRAWER_SCRIPT } from "@noeta/theme/chrome";
+import { COPY_SCRIPT, COPY_CSS, snippetHtml } from "@noeta/theme/copy";
 import type { Env } from "./index";
 import { type Inclusion, inclusionData, signatureFor } from "./log";
 import { ensureHighlighter, highlightHtml, resolveLang } from "./shiki";
@@ -25,19 +26,10 @@ const SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)*$/;
 /** Mirrors the publish-side KEYWORD in index.ts — the browse route validates before it queries. */
 const KEYWORD = /^[a-z0-9][a-z0-9-]{0,19}$/;
 
-/**
- * The one script the page runs: copy-to-clipboard for every `.snippet` code block (sidebar install
- * lines, README fences, docs signatures). One delegated listener covers them all — blocks are
- * server-rendered, so nothing needs re-wiring. The payload is the sibling `<code>`'s textContent:
- * the browser decodes entities and drops the highlight spans, so the clipboard gets exactly the raw
- * code, never the highlighted HTML. It is inline and pinned in the CSP by the SHA-256 hash below,
- * so only this exact byte sequence may execute — an injected `<script>` still can't. If you edit
- * this string, recompute the hash (the test in web.test.ts fails until the two match).
- */
-const COPY_SCRIPT =
-  `document.addEventListener("click",function(e){var t=e.target;var b=t&&t.closest?t.closest(".copy-btn"):null;if(!b)return;var c=b.parentElement.querySelector("code");if(!c||!navigator.clipboard)return;navigator.clipboard.writeText(c.textContent).then(function(){b.setAttribute("data-copied","");b.setAttribute("aria-label","Copied");setTimeout(function(){b.removeAttribute("data-copied");b.setAttribute("aria-label","Copy to clipboard")},2000)})});`;
-/** SHA-256 of COPY_SCRIPT, as a CSP `script-src` hash source. */
-const COPY_SCRIPT_HASH = "sha256-3BWWfCggIMSA3/qeEfPS9ISEwavdgUk8EKNF9CxDu/A=";
+/** SHA-256 of @noeta/theme's COPY_SCRIPT, as a CSP `script-src` hash source. The script moved to
+ *  the theme so docs and the registry share one button; edit it there → recompute here (the hash
+ *  check in web.test.ts hashes the served bytes and fails until the two agree). */
+const COPY_SCRIPT_HASH = "sha256-L52abVqoXoQfYO26hzh/Ug1xCbeQSKbI7aVVnnMTHg4=";
 
 /**
  * Progressive enhancement for the docs tab's search: filters the already-rendered declarations live
@@ -432,12 +424,6 @@ function sidebar(name: string, r: Row, logIndex: number | null, snippets: string
   </aside>`;
 }
 
-/** The copy button's inline SVG icons — the CSP allows no external assets, so they ride the markup.
- *  CSS swaps clipboard → checkmark on the `[data-copied]` attribute COPY_SCRIPT sets. */
-const COPY_ICON =
-  `<svg class="ic-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
-const CHECK_ICON =
-  `<svg class="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
 /** The proof modal's dismiss glyph — same stroke language as the theme's drawer close. */
 const CLOSE_ICON =
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
@@ -449,16 +435,6 @@ function proofModal(): string {
     <button class="modal-close" type="button" aria-label="Close">${CLOSE_ICON}</button>
     <div class="modal-body"></div>
   </dialog>`;
-}
-
-/**
- * A copyable code block from *rendered* code HTML (already escaped, possibly carrying shiki
- * token spans), plus the hover-revealed copy button COPY_SCRIPT wires up. The copy payload is the
- * `<code>` element's textContent — entity-decoded, span-stripped by the browser — so a highlighted
- * block still copies as its exact raw source.
- */
-function snippetHtml(codeHtml: string, preClass = ""): string {
-  return `<div class="snippet"><pre${preClass ? ` class="${preClass}"` : ""}><code>${codeHtml}</code></pre><button class="copy-btn" type="button" aria-label="Copy to clipboard">${COPY_ICON}${CHECK_ICON}</button></div>`;
 }
 
 /** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
@@ -1378,21 +1354,11 @@ ul.keywords li{padding:0}
    one-line TOML table scrolls. */
 .pkg-side pre{padding:.55rem .7rem;white-space:pre;overflow-x:auto}
 .pkg-side pre code{font-size:.75rem;line-height:1.55}
-/* copy button — an icon (inline SVG; the CSP allows no external assets), revealed on hover/focus,
-   wired up by COPY_SCRIPT. [data-copied] swaps clipboard → checkmark for ~2s. Every .snippet gets
-   one: sidebar install lines, README/docs fenced blocks, and docs signature blocks. */
-.snippet{position:relative;margin:1rem 0}
+/* copy button — the shared control from @noeta/theme, injected verbatim so docs and the registry
+   cannot drift; the two rules below are this site's own placement of it. */
+${COPY_CSS}
+.snippet{margin:1rem 0}
 .pkg-side .snippet{margin:0}
-.snippet pre{margin:0}
-.copy-btn{position:absolute;top:.4rem;right:.4rem;display:inline-flex;align-items:center;justify-content:center;padding:.28rem;border:1px solid var(--line-strong);border-radius:6px;background:color-mix(in srgb,var(--surface-2) 90%,transparent);color:var(--text-1);cursor:pointer;opacity:0;transition:opacity 140ms ease,color 140ms ease,border-color 140ms ease}
-.copy-btn svg{display:block;width:.85rem;height:.85rem}
-.copy-btn .ic-check{display:none}
-.snippet:hover .copy-btn,.copy-btn:focus-visible{opacity:1}
-.copy-btn:hover{color:var(--text-0);border-color:var(--accent)}
-.copy-btn[data-copied]{opacity:1;color:var(--accent-2-bright);border-color:color-mix(in srgb,var(--accent-2) 45%,var(--line-strong))}
-.copy-btn[data-copied] .ic-copy{display:none}
-.copy-btn[data-copied] .ic-check{display:block}
-@media (prefers-reduced-motion:reduce){.copy-btn{transition:none}}
 .side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
 /* Single column below 56rem (the shared --bp-stack; this used to fold at 52rem, out of step with
  * the docs and playground layouts). The column must be minmax(0,1fr): a bare 1fr keeps
