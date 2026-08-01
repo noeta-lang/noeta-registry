@@ -1,5 +1,6 @@
 import { env, fetchMock, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { WIRE_MANIFEST_SHA256 } from "../src/wire-manifest";
 
 // Golden wire-fixture tests (audit-5 finding 9): `test/fixtures/wire/` is a VERBATIM copy of the
 // canonical fixture set in the language repo (`crates/noeta-pm/test_data/wire/` — see the README
@@ -9,8 +10,12 @@ import { beforeAll, describe, expect, it } from "vitest";
 // signatures (the checkpoint/advisory fixtures are signed with this suite's fixed test keys, and
 // RFC 8032 signing is deterministic, so a fresh log of the same records reproduces them exactly).
 // Dynamic publish timestamps are the one carve-out, asserted for internal consistency instead.
-// The MANIFEST test pins the copy: a fixture edited here (or a stale copy after the canonical set
-// changed) fails the hash check.
+// The copy is pinned twice. MANIFEST.sha256 hashes every fixture, which catches a local hand-edit.
+// The manifest's own hash is `WIRE_MANIFEST_SHA256` in src/wire-manifest.ts — a SOURCE constant,
+// deliberately outside the copied directory — which catches the case the manifest alone cannot: the
+// manifest travels with the fixtures, so each repo hashing its own copy against its own manifest
+// stays green while the two protocols diverge. Copying fixtures across without moving the stamp now
+// fails here, by name.
 
 const ADMIN = "test-admin-token"; // matches vitest.config.ts miniflare bindings
 
@@ -58,7 +63,25 @@ async function publishFixture(name: string): Promise<Response> {
 
 // --- the copy pin ---------------------------------------------------------------------------------
 
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 describe("wire fixtures — the verbatim-copy pin", () => {
+  it("the manifest itself hashes to the cross-repo protocol stamp", async () => {
+    expect(
+      await sha256Hex(raw("MANIFEST.sha256")),
+      "`MANIFEST.sha256` no longer hashes to WIRE_MANIFEST_SHA256 (src/wire-manifest.ts).\n\n" +
+        "The wire fixtures changed in the language repo and were copied here, but the protocol stamp " +
+        "did not move — or they changed here and were never propagated back. Either way the two repos " +
+        "are one `cp` away from speaking different bytes with both suites green.\n\n" +
+        "Run `scripts/sync-wire-fixtures.sh` in the language repo (it regenerates, re-stamps BOTH " +
+        "repos and copies the set), then re-run both suites. Do not paste the new hash into the " +
+        "constant by hand — that fixes this test and nothing else.",
+    ).toBe(WIRE_MANIFEST_SHA256);
+  });
+
   it("every fixture hashes to its MANIFEST.sha256 entry, and every fixture is listed", async () => {
     const listed = new Set<string>();
     for (const line of raw("MANIFEST.sha256").trimEnd().split("\n")) {
