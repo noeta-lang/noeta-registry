@@ -1074,13 +1074,33 @@ function validateKeywords(raw: unknown): string[] | Response {
 
 /** Validate an incoming `description` field: absent → `null`; else a single-line blurb, trimmed,
  *  ≤ `MAX_DESCRIPTION` chars, no control characters (it's shown inline in search results and on the
- *  package page, so newlines and control chars have no place). Returns the value or a 400 Response. */
+ *  package page, so newlines and control chars have no place). Returns the value or a 400 Response.
+ *
+ *  MUST match the client's `noeta_pm::manifest::validate_description` — and the two units of
+ *  measurement below are why that comment used to be decoration rather than a fact:
+ *
+ *  - **Length counts Unicode code points**, `[...trimmed].length`, not `.length` (UTF-16 code
+ *    units). An emoji is one character to the human writing the blurb; `.length` charged it two, so
+ *    a description `noeta check` accepted client-side came back 400 from here.
+ *  - **The control class is the whole `Cc` category** — U+0000–U+001F *and* U+007F–U+009F, matching
+ *    Rust's `char::is_control`. The old ASCII-only test accepted U+0085 (NEL), which the client
+ *    rejects, so this endpoint would store a description no publisher could have written.
+ *
+ *  Pinned from both repos by the wire fixtures `publish-request-description-max.json` (exactly
+ *  `MAX_DESCRIPTION` astral-plane code points — must be accepted) and
+ *  `publish-request-description-control.json` (a U+0085 — must be rejected). Adopting the Rust
+ *  semantics rather than the reverse was deliberate: code points are what a human means by
+ *  "characters", and the client is where the message is actionable. */
 function validateDescription(raw: unknown): string | null | Response {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "string") return json({ error: "`description` must be a string" }, 400);
   const trimmed = raw.trim();
   // A single inline line: no control characters, which includes newlines and tabs.
-  if (trimmed.length === 0 || trimmed.length > MAX_DESCRIPTION || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+  if (
+    trimmed.length === 0 ||
+    [...trimmed].length > MAX_DESCRIPTION ||
+    /[\u0000-\u001f\u007f-\u009f]/.test(trimmed)
+  ) {
     return json({ error: `\`description\` must be a single line of ≤ ${MAX_DESCRIPTION} characters` }, 400);
   }
   return trimmed;
