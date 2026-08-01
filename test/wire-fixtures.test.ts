@@ -322,3 +322,53 @@ describe("wire fixtures — advisory feed", () => {
     expect(proof.index).toBe(0);
   });
 });
+
+// --- the publish limits' boundary ------------------------------------------------------------------
+//
+// `description` is validated on both sides — `noeta_pm::manifest::validate_description` client-side
+// so a bad blurb fails at `noeta check` rather than at publish, and `validateDescription` here so the
+// index never stores one. Two implementations of one rule, and they disagreed about the units
+// (audit row 4): this counted UTF-16 code units and rejected ASCII controls only, while the client
+// counted Unicode scalar values and rejected the whole `Cc` category. So an emoji cost two toward a
+// "characters" limit here and one there, and U+0085 was client-rejected and server-accepted.
+//
+// Both sides now use the Rust semantics — code points, and the full `Cc` category — and these two
+// fixtures are the boundary that says so from both repos. A limit that only agrees on ASCII is not a
+// limit that was checked.
+
+describe("wire fixtures — the publish limits' boundary", () => {
+  it("accepts a description of exactly MAX_DESCRIPTION astral-plane code points", async () => {
+    await registerAcme();
+    const body = fixture("publish-request-description-max.json");
+    // The fixture IS the boundary: 200 code points, 400 UTF-16 code units. If this ever stops
+    // holding, the fixture was regenerated wrong and the test below proves nothing.
+    expect([...body.description].length).toBe(200);
+    expect(body.description.length).toBe(400);
+    const r = await post("/packages/acme/imgfx", raw("publish-request-description-max.json"), ACME_TOKEN);
+    expect(
+      r.status,
+      "a description of exactly MAX_DESCRIPTION code points was rejected — this endpoint is counting " +
+        "UTF-16 code units again, so an emoji costs two here and one in `noeta check`",
+    ).toBe(201);
+    // And it round-trips: the stored blurb is the code points that were sent, not a truncation.
+    const listing = (await (await get("/packages/acme/imgfx")).json()) as any;
+    const stored = listing.versions.find((v: any) => v.version === body.version);
+    expect(stored.description).toBe(body.description);
+  });
+
+  it("rejects a description containing U+0085, the C1 control the client rejects", async () => {
+    await registerAcme();
+    const body = fixture("publish-request-description-control.json");
+    expect(body.description).toContain("\u0085");
+    const r = await post(
+      "/packages/acme/imgfx",
+      raw("publish-request-description-control.json"),
+      ACME_TOKEN,
+    );
+    expect(
+      r.status,
+      "a description containing U+0085 (NEL) was accepted — the control-character class has shrunk " +
+        "back to ASCII, so this endpoint would store a blurb `noeta check` refuses to let anyone write",
+    ).toBe(400);
+  });
+});

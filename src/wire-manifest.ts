@@ -20,4 +20,4 @@
 // It lives under `src/` rather than `test/` because it is a fact about the protocol this Worker
 // speaks, not about how it is tested — the Worker itself does not import it, and it is tree-shaken
 // out of the deployed bundle.
-export const WIRE_MANIFEST_SHA256 = "7b8b70d917b295839ccf548792e41339589375f519c3c3e434d25cf628ed69ae";
+export const WIRE_MANIFEST_SHA256 = "c12ee1002795ca4edba7ba50c3ec021bd2bdf383155878f366efbd06ffa8ba9e";
