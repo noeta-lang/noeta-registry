@@ -359,9 +359,15 @@ describe("registry web UI", () => {
     expect(body).toContain(INSTALL_HTML);
     // Escape-first: the quotes are entity-escaped inside the tok-str spans and render as `"`.
     expect(body).toContain(MANIFEST_HTML);
-    // A repository button — the release's git URL, labelled by destination.
+    // A repository button — the release's git URL, labelled by destination. The label is split at
+    // the last slash so the CSS can elide the host/owner prefix and keep the repo name; the arrow is
+    // its own item so a long label can never wrap it onto a second line.
     expect(body).toContain(`href="https://github.com/acme/greeter"`);
-    expect(body).toContain("github.com/acme/greeter →");
+    expect(body).toContain(
+      `<span class="side-button-label"><span class="repo-path">github.com/acme/</span>` +
+        `<span class="repo-name">greeter</span></span>` +
+        `<span class="side-button-go" aria-hidden="true">→</span>`,
+    );
     // A docs tab, because 1.1.0 has docs.
     expect(body).toContain("/acme/greeter/1.1.0/docs");
     // The declared license, as a badge on the selected version.
