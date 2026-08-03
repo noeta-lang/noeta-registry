@@ -1497,6 +1497,10 @@ ul.toc li{padding:0}
 /* code */
 pre{background:color-mix(in srgb,var(--surface-1) 88%,transparent);border:1px solid var(--line-strong);border-radius:var(--radius);padding:.9rem 1.05rem;overflow:auto}
 pre code,code{font-family:var(--font-mono);font-size:.86em}
+/* Code is typed, so it must render as typed — JetBrains Mono's default ligatures fuse
+ * |> and -> and != into single glyphs nobody has a key for. Mirrors theme.css.
+ * (No backticks here: this stylesheet is a template literal.) */
+code,pre,kbd,samp,.mono{font-variant-ligatures:none;font-feature-settings:"calt" 0,"liga" 0}
 :not(pre)>code{background:var(--surface-3);border:1px solid var(--line);padding:.08em .38em;border-radius:5px;color:var(--text-0)}
 pre.sig code{color:var(--text-0)}
 /* Syntax colors ride inline style="color:var(--syn-*)" on shiki's token spans (src/shiki.ts);
