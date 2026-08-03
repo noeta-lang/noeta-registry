@@ -418,7 +418,7 @@ function sidebar(name: string, r: Row, logIndex: number | null, snippets: string
     <h3>Repository</h3>
     ${
       /^https?:\/\//i.test(r.url)
-        ? `<p><a class="button side-button" href="${esc(r.url)}">${esc(repoLabel(r.url))} →</a></p>`
+        ? `<p><a class="button side-button" href="${esc(r.url)}" title="${esc(r.url)}">${repoLabelHtml(r.url)}<span class="side-button-go" aria-hidden="true">→</span></a></p>`
         : `<p class="mono muted">${esc(r.url)}</p>`
     }
   </aside>`;
@@ -437,10 +437,21 @@ function proofModal(): string {
   </dialog>`;
 }
 
-/** `https://github.com/acme/imgfx` → `github.com/acme/imgfx`, so the button reads as a destination. */
-function repoLabel(url: string): string {
+/**
+ * `https://github.com/acme/imgfx` → `github.com/acme/` + `imgfx`, so the button reads as a
+ * destination. The two halves are separate spans because the repo name is the part that identifies
+ * the destination: the CSS shrinks the host/owner prefix first and only elides the name once even an
+ * empty prefix would not fit. Fitting is left to the CSS rather than a character cap here — the
+ * sidebar is 17.5rem on desktop but full-width when the layout stacks, so no single cap is right for
+ * both, and the cap that used to live here truncated a label that had room and still let the arrow
+ * wrap to its own line.
+ */
+function repoLabelHtml(url: string): string {
   const label = url.replace(/^https?:\/\//i, "").replace(/\.git$/i, "").replace(/\/$/, "");
-  return label.length > 34 ? `${label.slice(0, 33)}…` : label;
+  const cut = label.lastIndexOf("/");
+  const path = cut === -1 ? "" : label.slice(0, cut + 1);
+  const name = cut === -1 ? label : label.slice(cut + 1);
+  return `<span class="side-button-label"><span class="repo-path">${esc(path)}</span><span class="repo-name">${esc(name)}</span></span>`;
 }
 
 /**
@@ -1359,7 +1370,18 @@ ul.keywords li{padding:0}
 ${COPY_CSS}
 .snippet{margin:1rem 0}
 .pkg-side .snippet{margin:0}
-.side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem}
+.side-button{width:100%;justify-content:center;font-size:.78rem;padding:.5rem .7rem;gap:.4rem}
+/* A repo label is one unbreakable "word" that routinely outgrows the 17.5rem rail. Left as flowing
+   text it wrapped, dropping the arrow onto a line of its own. So: the arrow never shrinks, and the
+   label elides — the host/owner prefix is the only shrinkable item, so "github.com/acme/" gives up
+   its characters first and "imgfx", the half that says where the button goes, stays whole. The name
+   only elides when it alone overruns the rail, which max-width (not shrinking, which would nibble a
+   sub-pixel off it in every other case and show a spurious ellipsis) is what catches. */
+.side-button-go{flex:none}
+.side-button-label{display:flex;min-width:0}
+.side-button-label>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-button-label>.repo-path{flex:0 1 auto;min-width:0}
+.side-button-label>.repo-name{flex:none;max-width:100%}
 /* Single column below 56rem (the shared --bp-stack; this used to fold at 52rem, out of step with
  * the docs and playground layouts). The column must be minmax(0,1fr): a bare 1fr keeps
  * min-width:auto, so it floors at the sidebar's min-content — and .side-kv can't
